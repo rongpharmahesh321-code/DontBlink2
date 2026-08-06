@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "522053783800",
+    "project_id": "dontblink-3d0f6",
+    "storage_bucket": "dontblink-3d0f6.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:522053783800:android:dac012a39c0b42aa406b0d",
+        "android_client_info": {
+          "package_name": "com.example.dont_blink"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD-AXVBxb0Y7QMVHsGFqDGVOfU2Yq-kMXU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
