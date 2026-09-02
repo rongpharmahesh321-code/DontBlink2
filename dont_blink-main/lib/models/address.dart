@@ -9,6 +9,10 @@ class Address {
   final String pincode;
   final bool isDefault;
 
+  // Location
+  final double? latitude;
+  final double? longitude;
+
   Address({
     required this.id,
     required this.fullName,
@@ -19,6 +23,8 @@ class Address {
     required this.state,
     required this.pincode,
     this.isDefault = false,
+    this.latitude,
+    this.longitude,
   });
 
   factory Address.fromFirestore(String id, Map<String, dynamic> data) {
@@ -32,6 +38,14 @@ class Address {
       state: data["state"] ?? "",
       pincode: data["pincode"] ?? "",
       isDefault: data["isDefault"] ?? false,
+
+      latitude: data["latitude"] != null
+          ? (data["latitude"] as num).toDouble()
+          : null,
+
+      longitude: data["longitude"] != null
+          ? (data["longitude"] as num).toDouble()
+          : null,
     );
   }
 
@@ -45,6 +59,9 @@ class Address {
       "state": state,
       "pincode": pincode,
       "isDefault": isDefault,
+
+      "latitude": latitude,
+      "longitude": longitude,
     };
   }
 }

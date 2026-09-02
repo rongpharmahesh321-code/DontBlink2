@@ -39,6 +39,18 @@ dependencies:
   cloud_firestore: ^6.8.0
   google_fonts: ^8.2.1
   pinput: ^6.0.2
+  provider: ^6.1.5+1
+  url_launcher: ^6.3.2
+  geolocator: ^14.0.2
+  http: ^1.6.0
+  flutter_map: ^8.3.1
+  latlong2: ^0.10.1
+  firebase_storage: ^13.4.6
+  image_picker: ^1.2.3
+  google_sign_in: ^7.2.0
+  country_picker: ^2.0.27
+  flutter_cashfree_pg_sdk: ^2.4.0+52
+  flutter_launcher_icons: ^0.14.4
 
 dev_dependencies:
   flutter_test:
@@ -55,6 +67,15 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  assets:
+  - assets/images/
+  
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/images/doorstepp_launcher_icon.png"
+  min_sdk_android: 21
 
   # To add assets to your application, add an assets section, like this:
   # assets:
