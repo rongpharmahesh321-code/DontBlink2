@@ -1,5 +1,9 @@
+import 'dart:convert';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import '../theme/app_colors.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -15,6 +19,8 @@ class _SettingsScreenState extends State<SettingsScreen>
   // ==========================================================
 
   bool notificationsEnabled = true;
+
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
   // ==========================================================
   // ANIMATION
@@ -68,134 +74,252 @@ class _SettingsScreenState extends State<SettingsScreen>
   User? get currentUser => FirebaseAuth.instance.currentUser;
 
   // ==========================================================
-  // SETTINGS TILE
+  // PROFILE BANNER
   // ==========================================================
 
-  Widget _buildTile({
-    required IconData icon,
-    required String title,
-    required String subtitle,
-    required int index,
-    VoidCallback? onTap,
-    Color color = Colors.black,
-    Widget? trailing,
-  }) {
-    return TweenAnimationBuilder<double>(
-      tween: Tween<double>(begin: 0, end: 1),
-      duration: Duration(milliseconds: 300 + (index * 50)),
-      curve: Curves.easeOutCubic,
+  Widget _buildProfileBanner() {
+    final user = currentUser;
+    if (user == null) return const SizedBox.shrink();
 
-      builder: (context, value, child) {
-        return Opacity(
-          opacity: value,
-          child: Transform.translate(
-            offset: Offset(0, 12 * (1 - value)),
-            child: child,
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: _firestore.collection('users').doc(user.uid).snapshots(),
+      builder: (context, snapshot) {
+        final data = snapshot.data?.data();
+        final name = data?['name']?.toString().trim() ??
+            user.displayName?.trim() ??
+            'doorstepp User';
+        final email = user.email ?? data?['email']?.toString() ?? '';
+        final phone = data?['phone']?.toString().trim() ??
+            user.phoneNumber?.trim() ??
+            '';
+        final photoUrl = data?['photoUrl']?.toString().trim() ??
+            user.photoURL?.trim() ??
+            '';
+
+        ImageProvider? avatarImage;
+        if (photoUrl.isNotEmpty) {
+          if (photoUrl.startsWith('data:image') ||
+              photoUrl.startsWith('base64,')) {
+            try {
+              final clean = photoUrl.contains(',')
+                  ? photoUrl.split(',').last
+                  : photoUrl;
+              avatarImage = MemoryImage(base64Decode(clean));
+            } catch (_) {}
+          } else {
+            avatarImage = NetworkImage(photoUrl);
+          }
+        }
+
+        final initial = name.isNotEmpty ? name[0].toUpperCase() : 'U';
+
+        return Container(
+          margin: const EdgeInsets.only(bottom: 18),
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: Colors.grey.shade200),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.03),
+                blurRadius: 10,
+                offset: const Offset(0, 3),
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              CircleAvatar(
+                radius: 26,
+                backgroundColor: AppColors.tintGreen,
+                child: ClipOval(
+                  child: avatarImage != null
+                      ? Image(
+                          image: avatarImage,
+                          width: 52,
+                          height: 52,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, _, _) => Text(
+                            initial,
+                            style: const TextStyle(
+                              color: AppColors.primary,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 20,
+                            ),
+                          ),
+                        )
+                      : Text(
+                          initial,
+                          style: const TextStyle(
+                            color: AppColors.primary,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 20,
+                          ),
+                        ),
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      name,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.black87,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      email.isNotEmpty
+                          ? email
+                          : (phone.isNotEmpty ? phone : 'doorstepp Account'),
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        color: Colors.grey.shade600,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
         );
       },
+    );
+  }
 
-      child: Card(
-        elevation: 2,
-        margin: const EdgeInsets.only(bottom: 14),
+  // ==========================================================
+  // GROUPED CONTAINERS & ITEMS
+  // ==========================================================
 
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-
-        child: InkWell(
-          borderRadius: BorderRadius.circular(15),
-          onTap: onTap,
-
-          child: ListTile(
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 15,
-              vertical: 6,
-            ),
-
-            leading: CircleAvatar(
-              backgroundColor: color == Colors.red
-                  ? Colors.red.shade50
-                  : Colors.green.shade100,
-
-              child: Icon(
-                icon,
-                color: color == Colors.red ? Colors.red : Colors.green,
-              ),
-            ),
-
-            title: Text(
-              title,
-              style: TextStyle(
-                color: color,
-                fontWeight: FontWeight.w600,
-                fontSize: 16,
-              ),
-            ),
-
-            subtitle: Text(
-              subtitle,
-              style: const TextStyle(color: Colors.grey, fontSize: 13),
-            ),
-
-            trailing:
-                trailing ?? const Icon(Icons.chevron_right, color: Colors.grey),
-          ),
+  Widget _buildSectionHeader(String title) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 4, bottom: 8, top: 12),
+      child: Text(
+        title,
+        style: TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
+          color: Colors.grey.shade600,
+          letterSpacing: 0.8,
         ),
       ),
     );
   }
 
-  // ==========================================================
-  // NOTIFICATION SETTING
-  // ==========================================================
-
-  Widget _notificationTile() {
-    return _buildTile(
-      icon: Icons.notifications_outlined,
-      title: 'Notifications',
-      subtitle: notificationsEnabled
-          ? 'Notifications are enabled'
-          : 'Notifications are disabled',
-      index: 0,
-      trailing: Switch(
-        value: notificationsEnabled,
-        activeThumbColor: Colors.green,
-        onChanged: (value) {
-          setState(() {
-            notificationsEnabled = value;
-          });
-
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                value ? 'Notifications enabled' : 'Notifications disabled',
-              ),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-        },
+  Widget _buildGroupContainer({required List<Widget> children}) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.shade200),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.02),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        children: children,
       ),
     );
   }
 
-  // ==========================================================
-  // ACCOUNT INFORMATION
-  // ==========================================================
+  Widget _buildGroupItem({
+    required IconData icon,
+    required String title,
+    String? subtitle,
+    VoidCallback? onTap,
+    Color? iconColor,
+    Color? iconBgColor,
+    Color? titleColor,
+    Widget? trailing,
+    bool showDivider = true,
+  }) {
+    return Column(
+      children: [
+        InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(16),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            child: Row(
+              children: [
+                Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    color: iconBgColor ?? AppColors.tintGreen,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(
+                    icon,
+                    size: 20,
+                    color: iconColor ?? AppColors.primary,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: TextStyle(
+                          fontSize: 14.5,
+                          fontWeight: FontWeight.w600,
+                          color: titleColor ?? Colors.black87,
+                        ),
+                      ),
+                      if (subtitle != null && subtitle.isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          subtitle,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey.shade600,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                trailing ??
+                    Icon(
+                      Icons.chevron_right_rounded,
+                      size: 20,
+                      color: Colors.grey.shade400,
+                    ),
+              ],
+            ),
+          ),
+        ),
+        if (showDivider)
+          Padding(
+            padding: const EdgeInsets.only(left: 64),
+            child: Divider(height: 1, color: Colors.grey.shade100),
+          ),
+      ],
+    );
+  }
 
-  Widget _accountInformation() {
-    final User? user = currentUser;
-
-    final String email = user?.email ?? 'No email';
-
-    final String phone = user?.phoneNumber?.trim().isNotEmpty == true
-        ? user!.phoneNumber!
-        : 'Not added';
-
-    return _buildTile(
-      icon: Icons.person_outline,
-      title: 'Account Information',
-      subtitle: '$email\nPhone: $phone',
-      index: 1,
-      onTap: _showAccountInformation,
+  void _clearCache() {
+    PaintingBinding.instance.imageCache.clear();
+    PaintingBinding.instance.imageCache.clearLiveImages();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('App cache cleared successfully!'),
+        behavior: SnackBarBehavior.floating,
+        duration: Duration(seconds: 2),
+      ),
     );
   }
 
@@ -311,6 +435,78 @@ class _SettingsScreenState extends State<SettingsScreen>
   // DELETE ACCOUNT CONFIRMATION
   // ==========================================================
 
+  Future<void> _showLegalDocument(String type) async {
+    final title = type == 'terms' ? 'Terms & Conditions' : 'Privacy Policy';
+
+    try {
+      final snapshot = await _firestore
+          .collection('legal_documents')
+          .doc(type)
+          .get();
+
+      final data = snapshot.data();
+      final content = data?['content']?.toString().trim() ?? '';
+
+      if (!mounted) return;
+
+      _showInformationDialog(
+        title: title,
+        content: content.isEmpty
+            ? 'This document has not been added yet.'
+            : content,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      _showInformationDialog(
+        title: title,
+        content:
+            'Unable to load this document right now. Please try again later.',
+      );
+    }
+  }
+
+  void _showLogoutDialog() {
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          title: const Text(
+            'Sign Out',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+          content: const Text(
+            'Are you sure you want to sign out of doorstepp?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('CANCEL', style: TextStyle(color: Colors.grey)),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+              onPressed: () async {
+                Navigator.pop(dialogContext);
+                await FirebaseAuth.instance.signOut();
+                if (!mounted) return;
+                Navigator.popUntil(context, (route) => route.isFirst);
+              },
+              child: const Text('SIGN OUT'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   void _showDeleteAccountDialog() {
     showDialog(
       context: context,
@@ -406,6 +602,7 @@ class _SettingsScreenState extends State<SettingsScreen>
       );
     }
   }
+
   // ==========================================================
   // BUILD
   // ==========================================================
@@ -413,17 +610,34 @@ class _SettingsScreenState extends State<SettingsScreen>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xffF7F8FA),
+      backgroundColor: const Color(0xFFF7FAF8),
 
       // ========================================================
       // APP BAR
       // ========================================================
       appBar: AppBar(
-        title: const Text('Settings'),
-        centerTitle: true,
-        backgroundColor: Colors.green,
-        foregroundColor: Colors.white,
+        title: const Text(
+          'Settings',
+          style: TextStyle(
+            color: Colors.black87,
+            fontWeight: FontWeight.w800,
+            fontSize: 18,
+          ),
+        ),
+        centerTitle: false,
+        backgroundColor: Colors.white,
+        foregroundColor: Colors.black87,
         elevation: 0,
+        leading: Navigator.canPop(context)
+            ? IconButton(
+                icon: const Icon(
+                  Icons.arrow_back_ios_new_rounded,
+                  color: Colors.black87,
+                  size: 19,
+                ),
+                onPressed: () => Navigator.pop(context),
+              )
+            : null,
       ),
 
       // ========================================================
@@ -431,176 +645,144 @@ class _SettingsScreenState extends State<SettingsScreen>
       // ========================================================
       body: FadeTransition(
         opacity: _fadeAnimation,
-
         child: SlideTransition(
           position: _slideAnimation,
-
           child: ListView(
-            padding: const EdgeInsets.all(16),
-
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 30),
             children: [
-              // ==================================================
-              // ACCOUNT
-              // ==================================================
-              const Padding(
-                padding: EdgeInsets.only(left: 4, bottom: 10),
+              // User Profile mini summary banner
+              _buildProfileBanner(),
 
-                child: Text(
-                  'Account',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
+              // SECTION 1: ACCOUNT & SECURITY
+              _buildSectionHeader('ACCOUNT & SECURITY'),
+              _buildGroupContainer(
+                children: [
+                  _buildGroupItem(
+                    icon: Icons.person_outline_rounded,
+                    title: 'Account Information',
+                    subtitle: 'View linked email and phone details',
+                    onTap: _showAccountInformation,
+                  ),
+                  _buildGroupItem(
+                    icon: Icons.shield_outlined,
+                    title: 'Security',
+                    subtitle: 'Account security and protection',
+                    onTap: _showSecurityInfo,
+                    showDivider: false,
+                  ),
+                ],
               ),
 
-              _accountInformation(),
+              // SECTION 2: PREFERENCES
+              _buildSectionHeader('PREFERENCES'),
+              _buildGroupContainer(
+                children: [
+                  _buildGroupItem(
+                    icon: Icons.notifications_outlined,
+                    title: 'Push Notifications',
+                    subtitle: notificationsEnabled
+                        ? 'Order updates, deals & delivery alerts'
+                        : 'Notifications are disabled',
+                    trailing: Switch.adaptive(
+                      value: notificationsEnabled,
+                      activeTrackColor: AppColors.primary,
+                      activeThumbColor: Colors.white,
+                      onChanged: (value) {
+                        setState(() {
+                          notificationsEnabled = value;
+                        });
 
-              // ==================================================
-              // SECURITY
-              // ==================================================
-              _buildTile(
-                icon: Icons.security_outlined,
-                title: 'Security',
-                subtitle: 'Manage your account security',
-                index: 2,
-                onTap: _showSecurityInfo,
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              value
+                                  ? 'Notifications enabled'
+                                  : 'Notifications disabled',
+                            ),
+                            behavior: SnackBarBehavior.floating,
+                            duration: const Duration(seconds: 2),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  _buildGroupItem(
+                    icon: Icons.cleaning_services_outlined,
+                    title: 'Clear Cache',
+                    subtitle: 'Free up local temporary memory and images',
+                    onTap: _clearCache,
+                    showDivider: false,
+                  ),
+                ],
               ),
 
-              const SizedBox(height: 12),
-
-              // ==================================================
-              // PREFERENCES
-              // ==================================================
-              const Padding(
-                padding: EdgeInsets.only(left: 4, bottom: 10),
-
-                child: Text(
-                  'Preferences',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-              ),
-
-              // ==================================================
-              // NOTIFICATIONS
-              // ==================================================
-              _notificationTile(),
-
-              // ==================================================
-              // LOCATION
-              // ==================================================
-              _buildTile(
-                icon: Icons.location_on_outlined,
-                title: 'Delivery Location',
-                subtitle: 'Manage your saved delivery addresses',
-                index: 4,
-                onTap: () {
-                  Navigator.pop(context);
-                },
-              ),
-
-              // ==================================================
-              // ABOUT
-              // ==================================================
-              const SizedBox(height: 12),
-
-              const Padding(
-                padding: EdgeInsets.only(left: 4, bottom: 10),
-
-                child: Text(
-                  'About',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-              ),
-
-              // ==================================================
-              // ABOUT DOORSTEPP
-              // ==================================================
-              _buildTile(
-                icon: Icons.info_outline,
-                title: 'About doorstepp',
-                subtitle: 'Version 1.0.0',
-                index: 5,
-                onTap: _showAbout,
-              ),
-
-              // ==================================================
-              // TERMS
-              // ==================================================
-              _buildTile(
-                icon: Icons.description_outlined,
-                title: 'Terms & Conditions',
-                subtitle: 'Read our terms and conditions',
-                index: 6,
-                onTap: () {
-                  _showInformationDialog(
+              // SECTION 3: ABOUT & LEGAL
+              _buildSectionHeader('ABOUT & LEGAL'),
+              _buildGroupContainer(
+                children: [
+                  _buildGroupItem(
+                    icon: Icons.info_outline_rounded,
+                    title: 'About doorstepp',
+                    subtitle: 'Version 1.0.6 • Build 18',
+                    onTap: _showAbout,
+                  ),
+                  _buildGroupItem(
+                    icon: Icons.description_outlined,
                     title: 'Terms & Conditions',
-                    content:
-                        'Terms and conditions for using doorstepp '
-                        'will be available here.',
-                  );
-                },
-              ),
-
-              // ==================================================
-              // PRIVACY
-              // ==================================================
-              _buildTile(
-                icon: Icons.privacy_tip_outlined,
-                title: 'Privacy Policy',
-                subtitle: 'Learn how your information is handled',
-                index: 7,
-                onTap: () {
-                  _showInformationDialog(
+                    subtitle: 'Read our terms of service',
+                    onTap: () => _showLegalDocument('terms'),
+                  ),
+                  _buildGroupItem(
+                    icon: Icons.privacy_tip_outlined,
                     title: 'Privacy Policy',
-                    content:
-                        'Your privacy is important to us. '
-                        'The complete doorstepp privacy policy '
-                        'will be available here.',
-                  );
-                },
+                    subtitle: 'Learn how your data is protected',
+                    onTap: () => _showLegalDocument('privacy'),
+                    showDivider: false,
+                  ),
+                ],
               ),
 
-              const SizedBox(height: 12),
-
-              // ==================================================
-              // DANGER ZONE
-              // ==================================================
-              const Padding(
-                padding: EdgeInsets.only(left: 4, bottom: 10),
-
-                child: Text(
-                  'Account Actions',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-              ),
-
-              // ==================================================
-              // DELETE ACCOUNT
-              // ==================================================
-              _buildTile(
-                icon: Icons.delete_outline,
-                title: 'Delete Account',
-                subtitle: 'Permanently delete your doorstepp account',
-                color: Colors.red,
-                index: 8,
-                onTap: _showDeleteAccountDialog,
+              // SECTION 4: ACCOUNT ACTIONS
+              _buildSectionHeader('ACCOUNT ACTIONS'),
+              _buildGroupContainer(
+                children: [
+                  _buildGroupItem(
+                    icon: Icons.logout_rounded,
+                    iconColor: Colors.grey.shade800,
+                    iconBgColor: Colors.grey.shade100,
+                    title: 'Log Out',
+                    subtitle: 'Sign out of your doorstepp account',
+                    onTap: _showLogoutDialog,
+                  ),
+                  _buildGroupItem(
+                    icon: Icons.delete_outline_rounded,
+                    iconColor: Colors.red.shade700,
+                    iconBgColor: Colors.red.shade50,
+                    title: 'Delete Account',
+                    titleColor: Colors.red.shade700,
+                    subtitle: 'Permanently remove your account and all data',
+                    onTap: _showDeleteAccountDialog,
+                    showDivider: false,
+                  ),
+                ],
               ),
 
               const SizedBox(height: 25),
 
-              // ==================================================
               // BRAND
-              // ==================================================
               const Center(
                 child: Text(
                   'doorstepp',
                   style: TextStyle(
                     color: Colors.grey,
                     fontSize: 14,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.5,
                   ),
                 ),
               ),
 
-              const SizedBox(height: 4),
+              const SizedBox(height: 3),
 
               const Center(
                 child: Text(
@@ -609,7 +791,7 @@ class _SettingsScreenState extends State<SettingsScreen>
                 ),
               ),
 
-              const SizedBox(height: 20),
+              const SizedBox(height: 15),
             ],
           ),
         ),

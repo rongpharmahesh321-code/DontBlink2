@@ -2,11 +2,14 @@ import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'rider_map_screen.dart';
+import '../services/rider_notification_service.dart';
+import '../services/delivery_tracking_service.dart';
 
 class RiderOrdersScreen extends StatefulWidget {
   const RiderOrdersScreen({super.key});
@@ -15,36 +18,28 @@ class RiderOrdersScreen extends StatefulWidget {
   State<RiderOrdersScreen> createState() => _RiderOrdersScreenState();
 }
 
-class _RiderOrdersScreenState extends State<RiderOrdersScreen> {
-  // ==========================================================
-  // FIRESTORE
-  // ==========================================================
-
+class _RiderOrdersScreenState extends State<RiderOrdersScreen>
+    with WidgetsBindingObserver {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final FirebaseAuth _auth = FirebaseAuth.instance;
 
-  // ==========================================================
-  // CACHED ORDERS STREAM
-  //
-  // IMPORTANT:
-  // We create this ONCE instead of creating the Firestore
-  // query every time build() runs.
-  // ==========================================================
+  bool _loadingProfile = true;
+  bool _locationReady = false;
+  bool _riderAvailable = false;
 
-  late final Stream<QuerySnapshot<Map<String, dynamic>>> _ordersStream;
+  Stream<QuerySnapshot<Map<String, dynamic>>>? _ordersStream;
 
-  // ==========================================================
-  // GPS
-  // ==========================================================
+  StreamSubscription<Position>? _availabilityPositionSubscription;
+  Timer? _heartbeatTimer;
 
-  StreamSubscription<Position>? _positionSubscription;
-
-  String? _trackingOrderId;
-
-  // ==========================================================
-  // PROCESSING ORDERS
-  // ==========================================================
+  DateTime? _lastAvailabilityWrite;
 
   final Set<String> _processingOrders = <String>{};
+
+  final RiderNotificationService _notificationService =
+      RiderNotificationService.instance;
+
+  StreamSubscription<RemoteMessage>? _deliveryOfferSubscription;
 
   // ==========================================================
   // INIT
@@ -54,33 +49,384 @@ class _RiderOrdersScreenState extends State<RiderOrdersScreen> {
   void initState() {
     super.initState();
 
-    final user = FirebaseAuth.instance.currentUser;
+    WidgetsBinding.instance.addObserver(this);
 
-    if (user != null) {
-      _ordersStream = _firestore
-          .collection('orders')
-          .where('riderId', isEqualTo: user.uid)
-          .snapshots();
-    } else {
-      _ordersStream = const Stream.empty();
+    _initializeRider();
+    _initializeNotifications();
+  }
+
+  // ==========================================================
+  // NOTIFICATIONS
+  // ==========================================================
+
+  Future<void> _initializeNotifications() async {
+    try {
+      await _notificationService.initialize();
+
+      await _deliveryOfferSubscription?.cancel();
+
+      _deliveryOfferSubscription = _notificationService.deliveryOffers.listen(
+        _handleDeliveryOfferNotification,
+        onError: (error) {
+          debugPrint('Delivery notification stream error: $error');
+        },
+      );
+    } catch (e) {
+      debugPrint('Rider notification initialization error: $e');
+    }
+  }
+
+  void _handleDeliveryOfferNotification(RemoteMessage message) {
+    if (!mounted) return;
+
+    final orderId = _notificationService.orderIdFrom(message);
+    final title = _notificationService.titleFrom(message);
+    final body = _notificationService.bodyFrom(message);
+
+    debugPrint(
+      'DELIVERY OFFER RECEIVED: '
+      'orderId=$orderId',
+    );
+
+    _showMessage(orderId == null ? '$title\n$body' : '$title\n$body');
+  }
+
+  // ==========================================================
+  // BUILD RIDER ORDER STREAM
+  // ==========================================================
+  //
+  // This is intentionally based on TWO conditions:
+  //
+  // 1. riderId == current rider
+  //
+  //    Existing deliveries belonging to this rider.
+  //
+  // 2. offeredRiderIds contains current rider
+  //
+  //    New nearby deliveries explicitly offered to this rider.
+  //
+  // IMPORTANT:
+  // The Firestore rules MUST also allow both conditions.
+  // ==========================================================
+
+  Stream<QuerySnapshot<Map<String, dynamic>>> _buildOrdersStream(String uid) {
+    return _firestore.collection('orders').snapshots();
+  }
+
+  // ==========================================================
+  // INITIALIZE RIDER
+  // ==========================================================
+
+  Future<void> _initializeRider() async {
+    final user = _auth.currentUser;
+
+    if (user == null) {
+      if (mounted) {
+        setState(() {
+          _loadingProfile = false;
+        });
+      }
+      return;
+    }
+
+    try {
+      final userRef = _firestore.collection('users').doc(user.uid);
+
+      final userSnapshot = await userRef.get();
+
+      if (!userSnapshot.exists) {
+        throw Exception('Rider profile not found.');
+      }
+
+      final data = userSnapshot.data() ?? <String, dynamic>{};
+
+      final role = data['role']?.toString().trim() ?? '';
+
+      if (role != 'rider') {
+        throw Exception('This account is not a rider.');
+      }
+
+      final isAvailable = data['isAvailable'] == true;
+
+      if (!mounted) return;
+
+      setState(() {
+        _loadingProfile = false;
+        _riderAvailable = isAvailable;
+        _ordersStream = _buildOrdersStream(user.uid);
+      });
+
+      // Start GPS immediately.
+      await _startAvailabilityTracking();
+    } catch (e) {
+      debugPrint('Rider initialization error: $e');
+
+      if (!mounted) return;
+
+      setState(() {
+        _loadingProfile = false;
+      });
+
+      _showMessage(e.toString().replaceFirst('Exception: ', ''), error: true);
     }
   }
 
   // ==========================================================
-  // UPDATE ORDER STATUS
+  // LOCATION PERMISSION
   // ==========================================================
 
-  Future<void> updateStatus({
-    required String orderId,
-    required String status,
-  }) async {
-    // Prevent double taps.
-    if (_processingOrders.contains(orderId)) {
+  Future<bool> _prepareLocation() async {
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+
+    if (!serviceEnabled) {
+      if (mounted) {
+        _showMessage('Please turn on Location/GPS.', error: true);
+      }
+
+      await Geolocator.openLocationSettings();
+
+      return false;
+    }
+
+    LocationPermission permission = await Geolocator.checkPermission();
+
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+
+    if (permission == LocationPermission.denied ||
+        permission == LocationPermission.deniedForever) {
+      if (mounted) {
+        _showMessage(
+          'Location permission is required to receive nearby deliveries.',
+          error: true,
+        );
+      }
+
+      return false;
+    }
+
+    return true;
+  }
+
+  // ==========================================================
+  // START AVAILABILITY GPS
+  // ==========================================================
+
+  Future<void> _startAvailabilityTracking() async {
+    final user = _auth.currentUser;
+
+    if (user == null) return;
+
+    final ready = await _prepareLocation();
+
+    if (!ready) {
+      if (mounted) {
+        setState(() {
+          _locationReady = false;
+          _riderAvailable = false;
+        });
+      }
+
       return;
     }
 
-    if (!mounted) {
+    try {
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+        ),
+      );
+
+      await _writeAvailabilityLocation(position, available: true);
+
+      await _availabilityPositionSubscription?.cancel();
+
+      _availabilityPositionSubscription =
+          Geolocator.getPositionStream(
+            locationSettings: const LocationSettings(
+              accuracy: LocationAccuracy.high,
+              distanceFilter: 50,
+            ),
+          ).listen(
+            (position) async {
+              if (!_riderAvailable) return;
+
+              await _writeAvailabilityLocation(position, available: true);
+            },
+            onError: (error) {
+              debugPrint('Rider availability GPS error: $error');
+            },
+          );
+
+      // Periodic heartbeat timer every 45s so stationary riders stay fresh in Firestore
+      _heartbeatTimer?.cancel();
+      _heartbeatTimer = Timer.periodic(const Duration(seconds: 45), (_) async {
+        if (!_riderAvailable || !mounted) return;
+        try {
+          final pos = await Geolocator.getCurrentPosition(
+            locationSettings: const LocationSettings(
+              accuracy: LocationAccuracy.high,
+            ),
+          );
+          await _writeAvailabilityLocation(pos, available: true, force: true);
+        } catch (_) {}
+      });
+
+      if (!mounted) return;
+
+      setState(() {
+        _locationReady = true;
+        _riderAvailable = true;
+      });
+    } catch (e) {
+      debugPrint('Availability tracking error: $e');
+
+      if (mounted) {
+        setState(() {
+          _locationReady = false;
+          _riderAvailable = false;
+        });
+      }
+    }
+  }
+
+  // ==========================================================
+  // WRITE RIDER LOCATION
+  // ==========================================================
+
+  Future<void> _writeAvailabilityLocation(
+    Position position, {
+    required bool available,
+    bool force = false,
+  }) async {
+    final user = _auth.currentUser;
+
+    if (user == null) return;
+
+    final now = DateTime.now();
+
+    if (!force &&
+        _lastAvailabilityWrite != null &&
+        now.difference(_lastAvailabilityWrite!) < const Duration(seconds: 20)) {
       return;
+    }
+
+    _lastAvailabilityWrite = now;
+
+    try {
+      await _firestore.collection('users').doc(user.uid).set({
+        'role': 'rider',
+        'isAvailable': available,
+        'riderLatitude': position.latitude,
+        'riderLongitude': position.longitude,
+        'riderLocationUpdatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      debugPrint(
+        'RIDER GPS: '
+        '${position.latitude}, '
+        '${position.longitude}',
+      );
+    } catch (e) {
+      debugPrint('Unable to save rider location: $e');
+    }
+  }
+
+  // ==========================================================
+  // ONLINE / OFFLINE
+  // ==========================================================
+
+  Future<void> _setRiderAvailability(bool available) async {
+    final user = _auth.currentUser;
+
+    if (user == null) return;
+
+    if (available) {
+      await _startAvailabilityTracking();
+
+      if (!_locationReady) return;
+
+      if (mounted) {
+        setState(() {
+          _riderAvailable = true;
+        });
+      }
+
+      return;
+    }
+
+    try {
+      _heartbeatTimer?.cancel();
+      _heartbeatTimer = null;
+
+      await _availabilityPositionSubscription?.cancel();
+
+      _availabilityPositionSubscription = null;
+
+      await _firestore.collection('users').doc(user.uid).set({
+        'isAvailable': false,
+        'riderLocationUpdatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      if (!mounted) return;
+
+      setState(() {
+        _riderAvailable = false;
+      });
+
+      _showMessage('You are now offline for new deliveries.');
+    } catch (e) {
+      if (mounted) {
+        _showMessage('Could not change availability.', error: true);
+      }
+    }
+  }
+
+  // ==========================================================
+  // APP LIFECYCLE
+  // ==========================================================
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+
+    if (state == AppLifecycleState.resumed) {
+      if (_riderAvailable) {
+        _startAvailabilityTracking();
+      }
+    }
+
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      _availabilityPositionSubscription?.pause();
+    }
+  }
+
+  // ==========================================================
+  // ACCEPT DELIVERY
+  // ==========================================================
+  //
+  // IMPORTANT:
+  //
+  // Firestore transaction makes this atomic.
+  //
+  // Rider A and Rider B can press ACCEPT.
+  //
+  // Only ONE transaction can successfully set riderId.
+  //
+  // The other rider gets:
+  //
+  // "This delivery has already been claimed..."
+  // ==========================================================
+
+  Future<bool> _claimOrder(String orderId) async {
+    final user = _auth.currentUser;
+
+    if (user == null) return false;
+
+    if (_processingOrders.contains(orderId)) {
+      return false;
     }
 
     setState(() {
@@ -88,52 +434,73 @@ class _RiderOrdersScreenState extends State<RiderOrdersScreen> {
     });
 
     try {
-      await _firestore.collection('orders').doc(orderId).update({
-        'status': status,
-        'updatedAt': FieldValue.serverTimestamp(),
+      final riderName = user.displayName?.trim().isNotEmpty == true
+          ? user.displayName!.trim()
+          : 'Delivery Partner';
+
+      final riderPhone = user.phoneNumber?.trim() ?? '';
+
+      final ref = _firestore.collection('orders').doc(orderId);
+
+      await _firestore.runTransaction((transaction) async {
+        final snapshot = await transaction.get(ref);
+
+        if (!snapshot.exists) {
+          throw Exception('Delivery no longer exists.');
+        }
+
+        final data = snapshot.data() ?? <String, dynamic>{};
+
+        final status = data['status']?.toString().trim().toLowerCase() ?? '';
+
+        final existingRider = data['riderId']?.toString().trim() ?? '';
+
+        // -----------------------------------------------
+        // Already claimed
+        // -----------------------------------------------
+
+        if (existingRider.isNotEmpty && existingRider != user.uid) {
+          throw Exception(
+            'This delivery has already been claimed by another rider.',
+          );
+        }
+
+        // -----------------------------------------------
+        // Do not accept completed/cancelled orders
+        // -----------------------------------------------
+
+        if (status == 'delivered' || status == 'cancelled') {
+          throw Exception('This delivery is no longer available.');
+        }
+
+        // -----------------------------------------------
+        // ATOMIC CLAIM: First rider to accept wins
+        // -----------------------------------------------
+
+        // -----------------------------------------------
+        // ATOMIC CLAIM
+        // -----------------------------------------------
+
+        transaction.update(ref, {
+          'riderId': user.uid,
+          'riderName': riderName,
+          'riderPhone': riderPhone,
+          'status': 'Assigned to Rider',
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
       });
 
-      if (!mounted) {
-        return;
-      }
+      if (!mounted) return true;
 
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          SnackBar(
-            content: Text('Order status updated to $status'),
-            behavior: SnackBarBehavior.floating,
-            duration: const Duration(seconds: 2),
-          ),
-        );
-    } on FirebaseException catch (e) {
-      if (!mounted) {
-        return;
-      }
+      _showMessage('Delivery accepted successfully.');
 
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          SnackBar(
-            content: Text(e.message ?? 'Unable to update order status.'),
-            backgroundColor: Colors.red,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
+      return true;
     } catch (e) {
-      if (!mounted) {
-        return;
+      if (mounted) {
+        _showMessage(e.toString().replaceFirst('Exception: ', ''), error: true);
       }
 
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          SnackBar(
-            content: Text('Unable to update order: $e'),
-            backgroundColor: Colors.red,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
+      return false;
     } finally {
       if (mounted) {
         setState(() {
@@ -144,1001 +511,533 @@ class _RiderOrdersScreenState extends State<RiderOrdersScreen> {
   }
 
   // ==========================================================
-  // START LIVE GPS TRACKING
+  // UPDATE STATUS
   // ==========================================================
 
-  Future<bool> startTracking(String orderId) async {
+  Future<void> _updateStatus({
+    required String orderId,
+    required String status,
+  }) async {
+    final user = _auth.currentUser;
+
+    if (user == null) return;
+
+    if (_processingOrders.contains(orderId)) {
+      return;
+    }
+
+    setState(() {
+      _processingOrders.add(orderId);
+    });
+
     try {
-      final user = FirebaseAuth.instance.currentUser;
+      final ref = _firestore.collection('orders').doc(orderId);
+      double earnedPayout = 16.0;
+      bool hasSurge = false;
 
-      if (user == null) {
-        if (!mounted) {
-          return false;
+      await _firestore.runTransaction((transaction) async {
+        final snapshot = await transaction.get(ref);
+
+        if (!snapshot.exists) {
+          throw Exception('Order no longer exists.');
         }
 
-        ScaffoldMessenger.of(context)
-          ..hideCurrentSnackBar()
-          ..showSnackBar(
-            const SnackBar(
-              content: Text('Rider account not found.'),
-              backgroundColor: Colors.red,
-            ),
-          );
+        final data = snapshot.data() ?? <String, dynamic>{};
 
-        return false;
-      }
+        final riderId = data['riderId']?.toString().trim() ?? '';
 
-      // ======================================================
-      // CHECK GPS SERVICE
-      // ======================================================
-
-      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
-
-      if (!serviceEnabled) {
-        if (!mounted) {
-          return false;
+        if (riderId != user.uid) {
+          throw Exception('This order is not assigned to you.');
         }
 
-        ScaffoldMessenger.of(context)
-          ..hideCurrentSnackBar()
-          ..showSnackBar(
-            const SnackBar(
-              content: Text('Please turn on Location/GPS.'),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
+        final updateData = <String, dynamic>{
+          'status': status,
+          'updatedAt': FieldValue.serverTimestamp(),
+        };
 
-        await Geolocator.openLocationSettings();
+        if (status == 'Delivered') {
+          final fee = (data['deliveryFee'] as num?)?.toDouble() ?? 0.0;
+          final surcharge = (data['deliverySurcharge'] as num?)?.toDouble() ?? 0.0;
+          hasSurge = data['hasSurcharge'] == true || surcharge > 0 || fee > 25.0;
+          earnedPayout = (data['riderPayout'] as num?)?.toDouble() ??
+              (data['riderEarnings'] as num?)?.toDouble() ??
+              (hasSurge ? 19.0 : 16.0);
 
-        return false;
-      }
-
-      // ======================================================
-      // CHECK PERMISSION
-      // ======================================================
-
-      LocationPermission permission = await Geolocator.checkPermission();
-
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
-
-      if (permission == LocationPermission.denied ||
-          permission == LocationPermission.deniedForever) {
-        if (!mounted) {
-          return false;
+          updateData['deliveredAt'] = FieldValue.serverTimestamp();
+          updateData['riderPayout'] = earnedPayout;
+          updateData['riderEarnings'] = earnedPayout;
         }
 
-        ScaffoldMessenger.of(context)
-          ..hideCurrentSnackBar()
-          ..showSnackBar(
-            const SnackBar(
-              content: Text(
-                'Location permission is required '
-                'for live delivery tracking.',
-              ),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-
-        return false;
-      }
-
-      // ======================================================
-      // GET CURRENT POSITION
-      // ======================================================
-
-      final position = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-        ),
-      );
-
-      // ======================================================
-      // RIDER DETAILS
-      // ======================================================
-
-      final riderName = user.displayName?.trim().isNotEmpty == true
-          ? user.displayName!.trim()
-          : 'Delivery Partner';
-
-      final riderPhone = user.phoneNumber?.trim() ?? '';
-
-      // ======================================================
-      // SAVE INITIAL LOCATION
-      //
-      // This also changes the order to Out for Delivery.
-      // ======================================================
-
-      await _firestore.collection('orders').doc(orderId).update({
-        'riderId': user.uid,
-        'riderName': riderName,
-        'riderPhone': riderPhone,
-        'riderLatitude': position.latitude,
-        'riderLongitude': position.longitude,
-        'riderLocationUpdatedAt': FieldValue.serverTimestamp(),
-        'status': 'Out for Delivery',
-        'updatedAt': FieldValue.serverTimestamp(),
+        transaction.update(ref, updateData);
       });
 
-      // ======================================================
-      // STOP PREVIOUS GPS SESSION
-      // ======================================================
-
-      await _positionSubscription?.cancel();
-
-      _positionSubscription = null;
-
-      _trackingOrderId = orderId;
-
-      // ======================================================
-      // LIVE GPS SETTINGS
-      // ======================================================
-
-      const locationSettings = LocationSettings(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 5,
-      );
-
-      // ======================================================
-      // START GPS STREAM
-      // ======================================================
-
-      _positionSubscription =
-          Geolocator.getPositionStream(
-            locationSettings: locationSettings,
-          ).listen(
-            (Position position) async {
-              try {
-                await _firestore.collection('orders').doc(orderId).update({
-                  'riderLatitude': position.latitude,
-                  'riderLongitude': position.longitude,
-                  'riderLocationUpdatedAt': FieldValue.serverTimestamp(),
-                });
-
-                debugPrint(
-                  'LIVE RIDER GPS: '
-                  '${position.latitude}, '
-                  '${position.longitude}',
-                );
-              } catch (e) {
-                debugPrint('GPS update error: $e');
-              }
-            },
-            onError: (error) {
-              debugPrint('GPS stream error: $error');
-            },
+      if (mounted) {
+        if (status == 'Delivered') {
+          _showMessage(
+            hasSurge
+                ? '🎉 Delivery completed! You earned ₹${earnedPayout.toInt()} (incl. ₹3 rain surge) 🌧️'
+                : '🎉 Delivery completed! You earned ₹${earnedPayout.toInt()}.',
           );
-
-      if (!mounted) {
-        return true;
+        } else {
+          _showMessage('Order updated to $status.');
+        }
       }
-
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          const SnackBar(
-            content: Text('Live GPS tracking started 📍'),
-            backgroundColor: Colors.green,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-
-      return true;
     } catch (e) {
-      debugPrint('Start tracking error: $e');
-
-      if (!mounted) {
-        return false;
+      if (mounted) {
+        _showMessage(e.toString().replaceFirst('Exception: ', ''), error: true);
       }
-
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          SnackBar(
-            content: Text('Unable to start GPS tracking: $e'),
-            backgroundColor: Colors.red,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-
-      return false;
+    } finally {
+      if (mounted) {
+        setState(() {
+          _processingOrders.remove(orderId);
+        });
+      }
     }
   }
 
   // ==========================================================
-  // STOP LIVE GPS
+  // START DELIVERY TRACKING
   // ==========================================================
 
-  Future<void> stopTracking() async {
-    await _positionSubscription?.cancel();
+  Future<bool> _startDeliveryTracking(String orderId) async {
+    final started = await DeliveryTrackingService.instance.start(
+      orderId: orderId,
+    );
 
-    _positionSubscription = null;
+    if (mounted && !started) {
+      _showMessage('Unable to start live delivery tracking.', error: true);
+    }
 
-    _trackingOrderId = null;
+    return started;
   }
 
   // ==========================================================
   // CALL CUSTOMER
   // ==========================================================
 
-  Future<void> callCustomer(String phone) async {
-    if (phone.trim().isEmpty) {
+  Future<void> _callCustomer(String phone) async {
+    final value = phone.trim();
+
+    if (value.isEmpty) {
+      _showMessage('Customer phone number is unavailable.', error: true);
       return;
     }
 
-    final phoneUri = Uri(scheme: 'tel', path: phone.trim());
+    final uri = Uri(scheme: 'tel', path: value);
 
     try {
-      if (await canLaunchUrl(phoneUri)) {
-        await launchUrl(phoneUri);
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri);
       } else {
-        if (!mounted) {
-          return;
-        }
-
-        ScaffoldMessenger.of(context)
-          ..hideCurrentSnackBar()
-          ..showSnackBar(
-            const SnackBar(content: Text('Unable to open phone app.')),
-          );
+        _showMessage('Unable to open phone dialer.', error: true);
       }
     } catch (e) {
-      if (!mounted) {
-        return;
-      }
-
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          SnackBar(
-            content: Text('Unable to call customer: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
+      _showMessage('Unable to call customer.', error: true);
     }
   }
 
   // ==========================================================
-  // DISPOSE
+  // OPEN MAP & NAVIGATION
   // ==========================================================
 
-  @override
-  void dispose() {
-    _positionSubscription?.cancel();
+  Future<void> _openStoreNavigation({
+    required double latitude,
+    required double longitude,
+    required String storeName,
+  }) async {
+    final navUri = Uri.parse('google.navigation:q=$latitude,$longitude&mode=d');
+    final webUri = Uri.parse(
+      'https://www.google.com/maps/dir/?api=1&destination=$latitude,$longitude',
+    );
 
-    super.dispose();
+    try {
+      if (await canLaunchUrl(navUri)) {
+        await launchUrl(navUri);
+      } else if (await canLaunchUrl(webUri)) {
+        await launchUrl(webUri, mode: LaunchMode.externalApplication);
+      } else if (mounted) {
+        _showMessage('Unable to open map for $storeName.', error: true);
+      }
+    } catch (e) {
+      if (mounted) {
+        _showMessage('Map error: $e', error: true);
+      }
+    }
   }
+
+  void _openMap(
+    String orderId,
+    Map<String, dynamic> order, {
+    bool focusStore = false,
+  }) {
+    final customerLatitude = _toDouble(order['customerLatitude']);
+    final customerLongitude = _toDouble(order['customerLongitude']);
+    final storeLatitude = _toDouble(order['storeLatitude']);
+    final storeLongitude = _toDouble(order['storeLongitude']);
+    final storeName = order['storeName']?.toString().trim() ?? '';
+    final storeCode = order['storeCode']?.toString().trim() ?? '';
+    final isRerouted = order['isRerouted'] == true;
+    final originalNearestStoreName =
+        order['originalNearestStoreName']?.toString().trim() ?? '';
+
+    if (customerLatitude == null || customerLongitude == null) {
+      _showMessage(
+        'Customer GPS location is not available for this order.',
+        error: true,
+      );
+      return;
+    }
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => RiderMapScreen(
+          orderId: orderId,
+          customerLatitude: customerLatitude,
+          customerLongitude: customerLongitude,
+          storeLatitude: storeLatitude,
+          storeLongitude: storeLongitude,
+          storeName: storeName,
+          storeCode: storeCode,
+          isRerouted: isRerouted,
+          originalNearestStoreName: originalNearestStoreName,
+          initialFocusStore: focusStore,
+        ),
+      ),
+    );
+  }
+
+  double? _toDouble(dynamic value) {
+    if (value is num) {
+      return value.toDouble();
+    }
+
+    return double.tryParse(value?.toString().trim() ?? '');
+  }
+
+  // ==========================================================
+  // MESSAGE
+  // ==========================================================
+
+  void _showMessage(String message, {bool error = false}) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: error ? Colors.red : Colors.green,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+  }
+
   // ==========================================================
   // STATUS COLOR
   // ==========================================================
 
-  Color statusColor(String status) {
-    switch (status) {
-      case 'Assigned to Rider':
-        return Colors.indigo;
-
-      case 'Accepted':
-        return Colors.blue;
-
-      case 'Picked Up':
-        return Colors.teal;
-
-      case 'Out for Delivery':
-        return Colors.orange;
-
-      case 'Delivered':
+  Color _statusColor(String status) {
+    switch (status.toLowerCase()) {
+      case 'delivered':
         return Colors.green;
 
-      case 'Cancelled':
+      case 'cancelled':
         return Colors.red;
 
-      default:
+      case 'out for delivery':
+        return Colors.orange;
+
+      case 'picked up':
+        return Colors.teal;
+
+      case 'accepted':
+        return Colors.blue;
+
+      case 'assigned to rider':
+        return Colors.indigo;
+
+      case 'packed':
         return Colors.deepPurple;
-    }
-  }
 
-  // ==========================================================
-  // STATUS ICON
-  // ==========================================================
-
-  IconData statusIcon(String status) {
-    switch (status) {
-      case 'Assigned to Rider':
-        return Icons.person_pin_circle;
-
-      case 'Accepted':
-        return Icons.check_circle_outline;
-
-      case 'Picked Up':
-        return Icons.inventory_2;
-
-      case 'Out for Delivery':
-        return Icons.delivery_dining;
-
-      case 'Delivered':
-        return Icons.check_circle;
-
-      case 'Cancelled':
-        return Icons.cancel;
+      case 'placed':
+        return Colors.orange;
 
       default:
-        return Icons.info_outline;
+        return Colors.grey;
     }
   }
 
   // ==========================================================
-  // FORMAT PRICE
-  // ==========================================================
-
-  String formatPrice(dynamic value) {
-    double price = 0;
-
-    if (value is num) {
-      price = value.toDouble();
-    } else {
-      price = double.tryParse(value.toString()) ?? 0;
-    }
-
-    if (price % 1 == 0) {
-      return '₹${price.toInt()}';
-    }
-
-    return '₹${price.toStringAsFixed(2)}';
-  }
-
-  // ==========================================================
-  // FORMAT DATE
-  // ==========================================================
-
-  String formatDate(dynamic timestamp) {
-    if (timestamp is! Timestamp) {
-      return 'Date unavailable';
-    }
-
-    final date = timestamp.toDate();
-
-    final day = date.day.toString().padLeft(2, '0');
-
-    final month = date.month.toString().padLeft(2, '0');
-
-    final hour = date.hour == 0
-        ? 12
-        : date.hour > 12
-        ? date.hour - 12
-        : date.hour;
-
-    final minute = date.minute.toString().padLeft(2, '0');
-
-    final period = date.hour >= 12 ? 'PM' : 'AM';
-
-    return '$day/$month/${date.year} • '
-        '$hour:$minute $period';
-  }
-  // ==========================================================
-  // PAYMENT INFORMATION
-  // ==========================================================
-
-  Widget buildPaymentInformation(Map<String, dynamic> order) {
-    final String paymentMethod =
-        order['paymentMethod']?.toString() ?? 'Cash on Delivery';
-
-    final String paymentStatus =
-        order['paymentStatus']?.toString() ?? 'Pending';
-
-    // --------------------------------------------------------
-    // DETERMINE PREPAID
-    // --------------------------------------------------------
-
-    final String normalizedPaymentMethod = paymentMethod.trim().toLowerCase();
-
-    final bool isPrepaid = order['isPrepaid'] is bool
-        ? order['isPrepaid'] as bool
-        : normalizedPaymentMethod != 'cash on delivery' &&
-              normalizedPaymentMethod != 'cod';
-
-    // --------------------------------------------------------
-    // AMOUNT TO COLLECT
-    // --------------------------------------------------------
-
-    double amountToCollect = 0;
-
-    final amountValue = order['amountToCollect'];
-
-    if (amountValue is num) {
-      amountToCollect = amountValue.toDouble();
-    } else {
-      amountToCollect = double.tryParse(amountValue?.toString() ?? '') ?? 0;
-    }
-
-    // --------------------------------------------------------
-    // OLD COD ORDERS FALLBACK
-    // --------------------------------------------------------
-
-    if (!isPrepaid && amountToCollect <= 0) {
-      final grandTotal = order['grandTotal'];
-
-      if (grandTotal is num) {
-        amountToCollect = grandTotal.toDouble();
-      } else {
-        amountToCollect = double.tryParse(grandTotal?.toString() ?? '') ?? 0;
-      }
-    }
-
-    // ========================================================
-    // PREPAID
-    // ========================================================
-
-    if (isPrepaid) {
-      return Container(
-        width: double.infinity,
-
-        padding: const EdgeInsets.all(16),
-
-        decoration: BoxDecoration(
-          color: Colors.green.shade50,
-
-          borderRadius: BorderRadius.circular(16),
-
-          border: Border.all(color: Colors.green.shade300, width: 1.5),
-        ),
-
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-
-          children: [
-            Row(
-              children: [
-                Container(
-                  width: 42,
-                  height: 42,
-
-                  decoration: BoxDecoration(
-                    color: Colors.green,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-
-                  child: const Icon(Icons.verified, color: Colors.white),
-                ),
-
-                const SizedBox(width: 11),
-
-                const Expanded(
-                  child: Text(
-                    'PREPAID',
-                    style: TextStyle(
-                      color: Colors.green,
-                      fontSize: 19,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 6,
-                  ),
-
-                  decoration: BoxDecoration(
-                    color: Colors.green,
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-
-                  child: Text(
-                    paymentStatus.toUpperCase(),
-
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 10,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 12),
-
-            Text(
-              'Payment: $paymentMethod',
-              style: const TextStyle(fontWeight: FontWeight.w600),
-            ),
-
-            const SizedBox(height: 8),
-
-            const Row(
-              children: [
-                Icon(Icons.check_circle, size: 18, color: Colors.green),
-
-                SizedBox(width: 7),
-
-                Expanded(
-                  child: Text(
-                    'Payment already received',
-                    style: TextStyle(
-                      color: Colors.green,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 8),
-
-            const Row(
-              children: [
-                Icon(Icons.money_off, size: 18, color: Colors.green),
-
-                SizedBox(width: 7),
-
-                Text(
-                  'Collect from customer: ₹0',
-                  style: TextStyle(
-                    color: Colors.green,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 15,
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      );
-    }
-
-    // ========================================================
-    // COD
-    // ========================================================
-
-    return Container(
-      width: double.infinity,
-
-      padding: const EdgeInsets.all(16),
-
-      decoration: BoxDecoration(
-        color: Colors.orange.shade50,
-
-        borderRadius: BorderRadius.circular(16),
-
-        border: Border.all(color: Colors.orange.shade300, width: 1.5),
-      ),
-
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 42,
-                height: 42,
-
-                decoration: BoxDecoration(
-                  color: Colors.orange,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-
-                child: const Icon(Icons.payments, color: Colors.white),
-              ),
-
-              const SizedBox(width: 11),
-
-              const Expanded(
-                child: Text(
-                  'CASH ON DELIVERY',
-                  style: TextStyle(
-                    color: Colors.orange,
-                    fontSize: 17,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 6,
-                ),
-
-                decoration: BoxDecoration(
-                  color: Colors.orange,
-                  borderRadius: BorderRadius.circular(20),
-                ),
-
-                child: Text(
-                  paymentStatus.toUpperCase(),
-
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 10,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 12),
-
-          const Text(
-            'Customer must pay when the order is delivered.',
-            style: TextStyle(fontWeight: FontWeight.w600),
-          ),
-
-          const SizedBox(height: 12),
-
-          Container(
-            width: double.infinity,
-
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-
-            decoration: BoxDecoration(
-              color: Colors.orange.shade100,
-
-              borderRadius: BorderRadius.circular(12),
-            ),
-
-            child: Row(
-              children: [
-                const Icon(
-                  Icons.currency_rupee,
-                  color: Colors.orange,
-                  size: 22,
-                ),
-
-                const SizedBox(width: 7),
-
-                const Expanded(
-                  child: Text(
-                    'COLLECT FROM CUSTOMER',
-                    style: TextStyle(
-                      color: Colors.orange,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-
-                Text(
-                  formatPrice(amountToCollect),
-
-                  style: const TextStyle(
-                    color: Colors.orange,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 20,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-  // ==========================================================
-  // PRODUCT PLACEHOLDER
-  // ==========================================================
-
-  Widget productPlaceholder() {
-    return Container(
-      width: 58,
-      height: 58,
-      decoration: BoxDecoration(
-        color: Colors.grey.shade200,
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: const Icon(Icons.image_not_supported, color: Colors.grey),
-    );
-  }
-
-  // ==========================================================
-  // PRODUCTS
-  // ==========================================================
-
-  Widget buildProducts(List<dynamic> items) {
-    if (items.isEmpty) {
-      return Card(
-        color: Colors.grey.shade50,
-        child: const Padding(
-          padding: EdgeInsets.all(14),
-          child: Row(
-            children: [
-              Icon(Icons.shopping_bag_outlined, color: Colors.grey),
-
-              SizedBox(width: 10),
-
-              Text(
-                'No product information',
-                style: TextStyle(color: Colors.grey),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    return Card(
-      elevation: 1,
-      color: Colors.grey.shade50,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Row(
-              children: [
-                Icon(Icons.shopping_bag, color: Colors.green),
-
-                SizedBox(width: 8),
-
-                Text(
-                  'Products',
-                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 12),
-
-            ...items.map((item) {
-              if (item is! Map) {
-                return const SizedBox.shrink();
-              }
-
-              final name = item['name']?.toString() ?? 'Unknown Product';
-
-              final price = item['price']?.toString() ?? '₹0';
-
-              final quantity = item['quantity']?.toString() ?? '1';
-
-              final image = item['image']?.toString() ?? '';
-
-              return Container(
-                margin: const EdgeInsets.only(bottom: 10),
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: Colors.grey.shade200),
-                ),
-                child: Row(
-                  children: [
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(9),
-                      child: image.trim().isNotEmpty
-                          ? Image.network(
-                              image,
-                              width: 58,
-                              height: 58,
-                              fit: BoxFit.cover,
-                              errorBuilder: (_, __, ___) {
-                                return productPlaceholder();
-                              },
-                            )
-                          : productPlaceholder(),
-                    ),
-
-                    const SizedBox(width: 12),
-
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            name,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 15,
-                            ),
-                          ),
-
-                          const SizedBox(height: 5),
-
-                          Text(
-                            'Quantity: $quantity',
-                            style: const TextStyle(
-                              color: Colors.grey,
-                              fontSize: 13,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-
-                    Text(
-                      price,
-                      style: const TextStyle(
-                        color: Colors.green,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 15,
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            }),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // ==========================================================
-  // BUILD SCREEN
+  // BUILD
   // ==========================================================
 
   @override
   Widget build(BuildContext context) {
-    final user = FirebaseAuth.instance.currentUser;
-
-    if (user == null) {
+    if (_loadingProfile) {
       return const Scaffold(
-        body: Center(child: Text('Rider is not logged in')),
+        body: Center(child: CircularProgressIndicator(color: Colors.green)),
       );
     }
 
+    final ordersStream = _ordersStream;
+
     return Scaffold(
-      backgroundColor: const Color(0xffF7F8FA),
-
+      backgroundColor: const Color(0xffF5F7F6),
       appBar: AppBar(
-        title: const Text('My Deliveries'),
-
-        centerTitle: true,
-
         backgroundColor: Colors.green,
-
         foregroundColor: Colors.white,
-
         elevation: 0,
+        title: const Text(
+          'My Deliveries',
+          style: TextStyle(fontWeight: FontWeight.w900),
+        ),
+        actions: [
+          IconButton(
+            tooltip: _riderAvailable ? 'Go offline' : 'Go online',
+            onPressed: () => _setRiderAvailability(!_riderAvailable),
+            icon: Icon(
+              _riderAvailable
+                  ? Icons.radio_button_checked_rounded
+                  : Icons.radio_button_off_rounded,
+            ),
+          ),
+        ],
       ),
-
-      // ========================================================
-      // IMPORTANT
-      //
-      // We now use the CACHED `_ordersStream`
-      // created in initState().
-      //
-      // This prevents the Firestore query itself from being
-      // recreated every time the screen rebuilds.
-      // ========================================================
-      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-        stream: _ordersStream,
-
-        builder: (context, snapshot) {
-          // ====================================================
-          // LOADING
-          // ====================================================
-
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(
-              child: CircularProgressIndicator(color: Colors.green),
-            );
-          }
-
-          // ====================================================
-          // ERROR
-          // ====================================================
-
-          if (snapshot.hasError) {
-            return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(
-                      Icons.error_outline,
-                      color: Colors.red,
-                      size: 60,
-                    ),
-
-                    const SizedBox(height: 15),
-
-                    const Text(
-                      'Unable to load deliveries',
-                      style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-
-                    const SizedBox(height: 10),
-
-                    Text(
-                      '${snapshot.error}',
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(color: Colors.red, fontSize: 13),
-                    ),
-                  ],
+      body: Column(
+        children: [
+          // ==================================================
+          // AVAILABILITY
+          // ==================================================
+          Container(
+            margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: _riderAvailable ? Colors.green.shade50 : Colors.white,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: _riderAvailable
+                    ? Colors.green.shade100
+                    : Colors.grey.shade200,
+              ),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    color: _riderAvailable
+                        ? Colors.green.shade100
+                        : Colors.grey.shade100,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    _riderAvailable
+                        ? Icons.delivery_dining_rounded
+                        : Icons.pause_circle_outline_rounded,
+                    color: _riderAvailable ? Colors.green : Colors.grey,
+                  ),
                 ),
-              ),
-            );
-          }
+                const SizedBox(width: 11),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _riderAvailable ? 'You are online' : 'You are offline',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w900,
+                          color: _riderAvailable
+                              ? Colors.green
+                              : Colors.grey.shade700,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        _riderAvailable
+                            ? 'Nearby delivery requests can be sent to you.'
+                            : 'Go online to receive nearby delivery requests.',
+                        style: TextStyle(
+                          fontSize: 9,
+                          color: Colors.grey.shade600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Switch.adaptive(
+                  value: _riderAvailable,
+                  activeThumbColor: Colors.green,
+                  activeTrackColor: Colors.green.shade200,
+                  onChanged: _setRiderAvailability,
+                ),
+              ],
+            ),
+          ),
 
-          // ====================================================
+          // ==================================================
           // ORDERS
-          // ====================================================
+          // ==================================================
+          Expanded(
+            child: ordersStream == null
+                ? const Center(
+                    child: CircularProgressIndicator(color: Colors.green),
+                  )
+                : StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                    stream: ordersStream,
+                    builder: (context, snapshot) {
+                      if (snapshot.connectionState == ConnectionState.waiting) {
+                        return const Center(
+                          child: CircularProgressIndicator(color: Colors.green),
+                        );
+                      }
 
-          final orders = snapshot.data?.docs ?? [];
+                      if (snapshot.hasError) {
+                        return Center(
+                          child: Padding(
+                            padding: const EdgeInsets.all(20),
+                            child: Text(
+                              'Unable to load deliveries.\n\n${snapshot.error}',
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(color: Colors.red),
+                            ),
+                          ),
+                        );
+                      }
 
-          // ====================================================
-          // EMPTY
-          // ====================================================
+                      final currentUid = _auth.currentUser?.uid;
 
-          if (orders.isEmpty) {
-            return RefreshIndicator(
-              color: Colors.green,
+                      final orders = (snapshot.data?.docs ?? []).where((doc) {
+                        final data = doc.data();
 
-              onRefresh: () async {
-                await Future.delayed(const Duration(milliseconds: 500));
-              },
+                        final riderId =
+                            data['riderId']?.toString().trim() ?? '';
 
-              child: ListView(
-                physics: const AlwaysScrollableScrollPhysics(),
+                        final status =
+                            data['status']?.toString().trim().toLowerCase() ??
+                            '';
 
-                children: const [
-                  SizedBox(height: 180),
+                        final mine = riderId == currentUid;
 
-                  Icon(Icons.delivery_dining, size: 85, color: Colors.grey),
+                        final finished =
+                            status == 'delivered' || status == 'cancelled';
 
-                  SizedBox(height: 18),
+                        // --------------------------------
+                        // IMPORTANT:
+                        //
+                        // An order offered to this rider
+                        // is visible only while it remains
+                        // unassigned.
+                        //
+                        // Once another rider accepts it,
+                        // riderId is no longer empty and this
+                        // rider immediately loses it.
+                        // --------------------------------
 
-                  Center(
-                    child: Text(
-                      'No Deliveries Yet',
-                      style: TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
+                        if (finished) {
+                          return false;
+                        }
+
+                        if (mine) {
+                          return true;
+                        }
+
+                        // If unassigned, show to ALL riders so anyone can accept
+                        if (riderId.isEmpty) {
+                          return true;
+                        }
+
+                        return false;
+                      }).toList();
+
+                      orders.sort((a, b) {
+                        final aValue = a.data()['createdAt'];
+
+                        final bValue = b.data()['createdAt'];
+
+                        if (aValue is Timestamp && bValue is Timestamp) {
+                          return bValue.compareTo(aValue);
+                        }
+
+                        if (aValue is Timestamp) {
+                          return -1;
+                        }
+
+                        if (bValue is Timestamp) {
+                          return 1;
+                        }
+
+                        return 0;
+                      });
+
+                      if (orders.isEmpty) {
+                        return RefreshIndicator(
+                          color: Colors.green,
+                          onRefresh: () async {
+                            await Future<void>.delayed(
+                              const Duration(milliseconds: 300),
+                            );
+                          },
+                          child: ListView(
+                            physics: const AlwaysScrollableScrollPhysics(),
+                            children: const [
+                              SizedBox(height: 130),
+                              Icon(
+                                Icons.delivery_dining,
+                                size: 82,
+                                color: Colors.grey,
+                              ),
+                              SizedBox(height: 18),
+                              Center(
+                                child: Text(
+                                  'No Deliveries Yet',
+                                  style: TextStyle(
+                                    fontSize: 21,
+                                    fontWeight: FontWeight.w900,
+                                  ),
+                                ),
+                              ),
+                              SizedBox(height: 8),
+                              Padding(
+                                padding: EdgeInsets.symmetric(horizontal: 30),
+                                child: Text(
+                                  'Nearby delivery requests will appear here when you are online.',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    color: Colors.grey,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      }
+
+                      return RefreshIndicator(
+                        color: Colors.green,
+                        onRefresh: () async {
+                          await Future<void>.delayed(
+                            const Duration(milliseconds: 300),
+                          );
+                        },
+                        child: ListView.builder(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          padding: const EdgeInsets.fromLTRB(16, 14, 16, 100),
+                          itemCount: orders.length,
+                          itemBuilder: (context, index) {
+                            final doc = orders[index];
+
+                            return _buildOrderCard(context, doc.id, doc.data());
+                          },
+                        ),
+                      );
+                    },
                   ),
-
-                  SizedBox(height: 8),
-
-                  Center(
-                    child: Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 30),
-                      child: Text(
-                        'Orders assigned to you '
-                        'will appear here automatically.',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(color: Colors.grey),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            );
-          }
-
-          // ====================================================
-          // ORDER LIST
-          // ====================================================
-
-          return ListView.builder(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
-
-            itemCount: orders.length,
-
-            itemBuilder: (context, index) {
-              final doc = orders[index];
-
-              final order = doc.data();
-
-              return _AnimatedRiderCard(
-                key: ValueKey(doc.id),
-
-                index: index,
-
-                child: _buildOrderCard(context, doc.id, order),
-              );
-            },
-          );
-        },
+          ),
+        ],
       ),
     );
   }
@@ -1152,910 +1051,697 @@ class _RiderOrdersScreenState extends State<RiderOrdersScreen> {
     String orderId,
     Map<String, dynamic> order,
   ) {
-    final status = order['status']?.toString() ?? 'Assigned to Rider';
-
+    final riderId = order['riderId']?.toString().trim() ?? '';
+    final unassigned = riderId.isEmpty;
+    final status = order['status']?.toString() ?? 'Placed';
+    final statusLower = status.toLowerCase();
     final customerName = order['customerName']?.toString() ?? 'Customer';
-
-    final customerPhone = order['customerPhone']?.toString() ?? '';
+    final phone =
+        (order['customerPhone'] ??
+                order['phone'] ??
+                order['phoneNumber'] ??
+                order['customerNumber'] ??
+                '')
+            .toString()
+            .trim();
 
     final address = order['address']?.toString() ?? 'No address';
-
     final total = order['grandTotal'] ?? 0;
+    final storeName = order['storeName']?.toString().trim() ?? '';
+    final storeCode = order['storeCode']?.toString().trim() ?? '';
+    final storeLat = _toDouble(order['storeLatitude']);
+    final storeLng = _toDouble(order['storeLongitude']);
+    final isRerouted = order['isRerouted'] == true;
+    final originalNearestStoreName =
+        order['originalNearestStoreName']?.toString().trim() ?? '';
+    final items = (order['items'] as List?) ?? [];
 
-    final createdAt = order['createdAt'];
+    final color = _statusColor(status);
+    final processing = _processingOrders.contains(orderId);
 
-    // ========================================================
-    // CUSTOMER LOCATION
-    // ========================================================
-
-    final double? customerLatitude = (order['customerLatitude'] as num?)
-        ?.toDouble();
-
-    final double? customerLongitude =
-        ((order['customerLongitude'] ?? order['customerlongitude']) as num?)
-            ?.toDouble();
-
-    // ========================================================
-    // ITEMS
-    // ========================================================
-
-    final List<dynamic> items = order['items'] is List
-        ? List<dynamic>.from(order['items'])
-        : [];
-
-    final color = statusColor(status);
-
-    final isProcessing = _processingOrders.contains(orderId);
-
-    return Card(
-      elevation: 2,
-
-      margin: const EdgeInsets.only(bottom: 18),
-
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-
-          children: [
-            // ==================================================
-            // HEADER
-            // ==================================================
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-
-              children: [
-                Container(
-                  width: 50,
-                  height: 50,
-
-                  decoration: BoxDecoration(
-                    color: color.withValues(alpha: 0.10),
-                    borderRadius: BorderRadius.circular(15),
-                  ),
-
-                  child: Icon(statusIcon(status), color: color, size: 27),
-                ),
-
-                const SizedBox(width: 12),
-
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        customerName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 19,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-
-                      const SizedBox(height: 4),
-
-                      Text(
-                        'Order #${orderId.length > 8 ? orderId.substring(0, 8).toUpperCase() : orderId.toUpperCase()}',
-                        style: const TextStyle(
-                          color: Colors.grey,
-                          fontSize: 11,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 7,
-                  ),
-
-                  decoration: BoxDecoration(
-                    color: color.withValues(alpha: 0.10),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-
-                  child: Text(
-                    status,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: color,
-                      fontSize: 10,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 14),
-
-            const Divider(height: 1),
-
-            const SizedBox(height: 14),
-
-            // ==================================================
-            // DATE
-            // ==================================================
-            Row(
-              children: [
-                const Icon(
-                  Icons.calendar_today_outlined,
-                  size: 15,
-                  color: Colors.grey,
-                ),
-
-                const SizedBox(width: 7),
-
-                Text(
-                  formatDate(createdAt),
-                  style: const TextStyle(color: Colors.grey, fontSize: 12),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 13),
-
-            // ==================================================
-            // CALL CUSTOMER
-            // ==================================================
-            if (customerPhone.isNotEmpty)
-              SizedBox(
-                width: double.infinity,
-
-                child: OutlinedButton.icon(
-                  icon: const Icon(Icons.phone, color: Colors.green),
-
-                  label: const Text(
-                    'CALL CUSTOMER',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-
-                  onPressed: isProcessing
-                      ? null
-                      : () {
-                          callCustomer(customerPhone);
-                        },
-                ),
-              ),
-
-            const SizedBox(height: 12),
-
-            // ==================================================
-            // ADDRESS
-            // ==================================================
-            Container(
-              width: double.infinity,
-
-              padding: const EdgeInsets.all(13),
-
-              decoration: BoxDecoration(
-                color: Colors.green.shade50,
-                borderRadius: BorderRadius.circular(12),
-              ),
-
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-
-                children: [
-                  const Icon(Icons.location_on, color: Colors.green),
-
-                  const SizedBox(width: 9),
-
-                  Expanded(
-                    child: Text(address, style: const TextStyle(fontSize: 14)),
-                  ),
-                ],
-              ),
-            ),
-
-            const SizedBox(height: 12),
-
-            // ==================================================
-            // DELIVERY MAP
-            // ==================================================
-            if (customerLatitude != null && customerLongitude != null)
-              SizedBox(
-                width: double.infinity,
-
-                child: OutlinedButton.icon(
-                  icon: const Icon(Icons.map, color: Colors.green),
-
-                  label: const Text(
-                    'VIEW DELIVERY MAP',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-
-                  onPressed: isProcessing
-                      ? null
-                      : () {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => RiderMapScreen(
-                                orderId: orderId,
-                                customerLatitude: customerLatitude,
-                                customerLongitude: customerLongitude,
-                              ),
-                            ),
-                          );
-                        },
-                ),
-              )
-            else
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: isRerouted ? Colors.orange.shade200 : Colors.grey.shade100,
+          width: isRerouted ? 1.2 : 1.0,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Order Header
+          Row(
+            children: [
               Container(
-                width: double.infinity,
-
-                padding: const EdgeInsets.all(12),
-
+                width: 44,
+                height: 44,
                 decoration: BoxDecoration(
-                  color: Colors.orange.shade50,
+                  color: unassigned
+                      ? Colors.orange.shade50
+                      : color.withValues(alpha: .10),
                   borderRadius: BorderRadius.circular(12),
                 ),
-
-                child: const Row(
+                child: Icon(
+                  unassigned
+                      ? Icons.notifications_active_outlined
+                      : Icons.receipt_long_outlined,
+                  color: unassigned ? Colors.orange : color,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Icon(Icons.location_off, color: Colors.orange),
-
-                    SizedBox(width: 8),
-
-                    Expanded(
-                      child: Text(
-                        'Customer GPS location is not available.',
-                        style: TextStyle(color: Colors.orange, fontSize: 13),
+                    Text(
+                      unassigned ? 'Delivery Available' : 'My Delivery',
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '#${orderId.length > 8 ? orderId.substring(0, 8).toUpperCase() : orderId.toUpperCase()}',
+                      style: TextStyle(
+                        color: Colors.grey.shade600,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
                       ),
                     ),
                   ],
                 ),
               ),
-
-            const SizedBox(height: 15),
-
-            // ==================================================
-            // PRODUCTS
-            // ==================================================
-            buildProducts(items),
-
-            const SizedBox(height: 15),
-
-            // ==================================================
-            // TOTAL
-            // ==================================================
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
-
-              decoration: BoxDecoration(
-                color: Colors.green.shade50,
-                borderRadius: BorderRadius.circular(12),
-              ),
-
-              child: Row(
-                children: [
-                  const Text(
-                    'Order Total',
-                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-                  ),
-
-                  const Spacer(),
-
-                  Text(
-                    formatPrice(total),
-                    style: const TextStyle(
-                      color: Colors.green,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 20,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-
-            const SizedBox(height: 18),
-
-            // ==================================================
-            // PAYMENT INFORMATION
-            // ==================================================
-            buildPaymentInformation(order),
-
-            const SizedBox(height: 18),
-            // ==================================================
-            // DELIVERY PROGRESS
-            // ==================================================
-            _buildStatusTimeline(status),
-
-            const SizedBox(height: 18),
-
-            // ==================================================
-            // ACTION
-            // ==================================================
-            _buildActionButton(
-              context: context,
-              orderId: orderId,
-              status: status,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-  // ==========================================================
-  // STATUS TIMELINE
-  // ==========================================================
-
-  Widget _buildStatusTimeline(String status) {
-    const stages = [
-      'Assigned to Rider',
-      'Accepted',
-      'Picked Up',
-      'Out for Delivery',
-      'Delivered',
-    ];
-
-    final currentIndex = stages.indexOf(status);
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'Delivery Progress',
-          style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
-        ),
-
-        const SizedBox(height: 14),
-
-        ...List.generate(stages.length, (index) {
-          final completed = currentIndex >= index;
-          final active = currentIndex == index;
-          final stage = stages[index];
-
-          return Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Column(
-                children: [
-                  AnimatedContainer(
-                    duration: const Duration(milliseconds: 250),
-                    width: 30,
-                    height: 30,
-                    decoration: BoxDecoration(
-                      color: completed ? Colors.green : Colors.grey.shade200,
-                      shape: BoxShape.circle,
-                    ),
-                    child: Icon(
-                      completed ? Icons.check : Icons.circle,
-                      size: completed ? 18 : 8,
-                      color: completed ? Colors.white : Colors.grey,
-                    ),
-                  ),
-
-                  if (index < stages.length - 1)
-                    Container(
-                      width: 2,
-                      height: 25,
-                      color: currentIndex > index
-                          ? Colors.green
-                          : Colors.grey.shade300,
-                    ),
-                ],
-              ),
-
-              const SizedBox(width: 12),
-
-              Padding(
-                padding: const EdgeInsets.only(top: 5),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: .10),
+                  borderRadius: BorderRadius.circular(20),
+                ),
                 child: Text(
-                  stage,
+                  status,
                   style: TextStyle(
-                    color: completed ? Colors.green : Colors.grey,
-                    fontWeight: active || completed
-                        ? FontWeight.bold
-                        : FontWeight.normal,
+                    color: color,
+                    fontSize: 8.5,
+                    fontWeight: FontWeight.w900,
                   ),
                 ),
               ),
             ],
-          );
-        }),
-      ],
-    );
-  }
+          ),
 
-  // ==========================================================
-  // ACTION BUTTON
-  // ==========================================================
-
-  Widget _buildActionButton({
-    required BuildContext context,
-    required String orderId,
-    required String status,
-  }) {
-    final processing = _processingOrders.contains(orderId);
-
-    // ========================================================
-    // ACCEPT DELIVERY
-    // ========================================================
-
-    if (status == 'Assigned to Rider') {
-      return SizedBox(
-        width: double.infinity,
-        height: 55,
-        child: ElevatedButton.icon(
-          icon: processing
-              ? const SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: Colors.white,
+          // Rerouted Warning Banner (if nearest store was out of stock)
+          if (isRerouted) ...[
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF7ED),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFFFDBA74)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.alt_route_rounded,
+                    color: Color(0xFFC2410C),
+                    size: 18,
                   ),
-                )
-              : const Icon(Icons.check_circle),
-
-          label: Text(
-            processing ? 'ACCEPTING...' : 'ACCEPT DELIVERY',
-            style: const TextStyle(fontWeight: FontWeight.bold),
-          ),
-
-          onPressed: processing
-              ? null
-              : () async {
-                  await updateStatus(orderId: orderId, status: 'Accepted');
-                },
-
-          style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.blue,
-            foregroundColor: Colors.white,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(14),
-            ),
-          ),
-        ),
-      );
-    }
-
-    // ========================================================
-    // PICK UP ORDER
-    // ========================================================
-
-    if (status == 'Accepted') {
-      return SizedBox(
-        width: double.infinity,
-        height: 55,
-        child: ElevatedButton.icon(
-          icon: processing
-              ? const SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: Colors.white,
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          '⚡ REROUTED BACKUP STORE PICKUP',
+                          style: TextStyle(
+                            color: Color(0xFFC2410C),
+                            fontSize: 10,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 0.3,
+                          ),
+                        ),
+                        Text(
+                          originalNearestStoreName.isNotEmpty
+                              ? 'Primary store was out of stock. Collect order from $storeName.'
+                              : 'Collect items from the alternate store indicated below.',
+                          style: const TextStyle(
+                            color: Color(0xFF9A3412),
+                            fontSize: 10,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                )
-              : const Icon(Icons.inventory_2),
-
-          label: Text(
-            processing ? 'UPDATING...' : 'PICK UP ORDER',
-            style: const TextStyle(fontWeight: FontWeight.bold),
-          ),
-
-          onPressed: processing
-              ? null
-              : () async {
-                  await updateStatus(orderId: orderId, status: 'Picked Up');
-                },
-
-          style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.teal,
-            foregroundColor: Colors.white,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(14),
-            ),
-          ),
-        ),
-      );
-    }
-
-    // ========================================================
-    // START DELIVERY
-    // ========================================================
-
-    if (status == 'Picked Up') {
-      return SizedBox(
-        width: double.infinity,
-        height: 55,
-        child: ElevatedButton.icon(
-          icon: processing
-              ? const SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: Colors.white,
-                  ),
-                )
-              : const Icon(Icons.delivery_dining),
-
-          label: Text(
-            processing ? 'STARTING...' : 'START DELIVERY',
-            style: const TextStyle(fontWeight: FontWeight.bold),
-          ),
-
-          onPressed: processing
-              ? null
-              : () async {
-                  setState(() {
-                    _processingOrders.add(orderId);
-                  });
-
-                  try {
-                    final started = await startTracking(orderId);
-
-                    if (!started) {
-                      return;
-                    }
-                  } finally {
-                    if (mounted) {
-                      setState(() {
-                        _processingOrders.remove(orderId);
-                      });
-                    }
-                  }
-                },
-
-          style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.orange,
-            foregroundColor: Colors.white,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(14),
-            ),
-          ),
-        ),
-      );
-    }
-
-    // ========================================================
-    // SLIDE TO DELIVER
-    // ========================================================
-
-    if (status == 'Out for Delivery') {
-      return _SlideToDeliver(
-        onDelivered: () async {
-          await stopTracking();
-
-          await updateStatus(orderId: orderId, status: 'Delivered');
-        },
-      );
-    }
-
-    // ========================================================
-    // DELIVERED
-    // ========================================================
-
-    if (status == 'Delivered') {
-      return Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(15),
-        decoration: BoxDecoration(
-          color: Colors.green.shade50,
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: const Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.check_circle, color: Colors.green),
-
-            SizedBox(width: 8),
-
-            Text(
-              'ORDER DELIVERED',
-              style: TextStyle(
-                color: Colors.green,
-                fontWeight: FontWeight.bold,
-                fontSize: 16,
+                ],
               ),
             ),
           ],
-        ),
-      );
-    }
 
-    // ========================================================
-    // CANCELLED
-    // ========================================================
+          // STEP 1: PICKUP STORE
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.all(11),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF8FAFC),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: const Color(0xFFE2E8F0)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 7,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF4F46E5),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: const Text(
+                        'STEP 1 • PICKUP STORE',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 8.5,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                    if (storeCode.isNotEmpty) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade200,
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          storeCode,
+                          style: TextStyle(
+                            color: Colors.grey.shade800,
+                            fontSize: 9,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
+                    const Spacer(),
+                    if (storeLat != null &&
+                        storeLng != null &&
+                        storeLat != 0 &&
+                        storeLng != 0)
+                      GestureDetector(
+                        onTap: () => _openStoreNavigation(
+                          latitude: storeLat,
+                          longitude: storeLng,
+                          storeName:
+                              storeName.isNotEmpty ? storeName : 'Store',
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: const [
+                            Icon(
+                              Icons.directions_rounded,
+                              size: 15,
+                              color: Color(0xFF4F46E5),
+                            ),
+                            SizedBox(width: 2),
+                            Text(
+                              'Directions',
+                              style: TextStyle(
+                                color: Color(0xFF4F46E5),
+                                fontSize: 10.5,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 7),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(
+                      Icons.storefront_rounded,
+                      color: Color(0xFF4F46E5),
+                      size: 20,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            storeName.isNotEmpty
+                                ? storeName
+                                : 'Doorstepp Dark Store',
+                            style: const TextStyle(
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w900,
+                              color: Color(0xFF0F172A),
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            isRerouted
+                                ? '⚠️ Alternate dark store pickup (inventory backup)'
+                                : 'Collect packed items at this store',
+                            style: TextStyle(
+                              color: isRerouted
+                                  ? const Color(0xFFC2410C)
+                                  : Colors.grey.shade600,
+                              fontSize: 10,
+                              fontWeight: isRerouted
+                                  ? FontWeight.w700
+                                  : FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
 
-    if (status == 'Cancelled') {
-      return Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(15),
-        decoration: BoxDecoration(
-          color: Colors.red.shade50,
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: const Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.cancel, color: Colors.red),
+          // STEP 2: DELIVER TO CUSTOMER
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.all(11),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF0FDF4),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: const Color(0xFFBBF7D0)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 7,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF16A34A),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: const Text(
+                        'STEP 2 • DELIVER TO CUSTOMER',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 8.5,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        customerName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w800,
+                          color: Color(0xFF14532D),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(
+                      Icons.location_on_rounded,
+                      color: Color(0xFF16A34A),
+                      size: 18,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        address,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.grey.shade700,
+                          fontSize: 10.5,
+                          height: 1.2,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
 
-            SizedBox(width: 8),
-
+          if (items.isNotEmpty) ...[
+            const SizedBox(height: 6),
             Text(
-              'ORDER CANCELLED',
-              style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
+              '📦 ${items.length} ${items.length == 1 ? "item" : "items"} to collect',
+              style: TextStyle(
+                color: Colors.grey.shade700,
+                fontSize: 10.5,
+                fontWeight: FontWeight.w700,
+              ),
             ),
           ],
-        ),
-      );
-    }
 
-    return const SizedBox.shrink();
+          const SizedBox(height: 8),
+
+          Builder(
+            builder: (context) {
+              final fee = (order['deliveryFee'] as num?)?.toDouble() ?? 0.0;
+              final surcharge =
+                  (order['deliverySurcharge'] as num?)?.toDouble() ?? 0.0;
+              final bool hasSurcharge =
+                  order['hasSurcharge'] == true || surcharge > 0 || fee > 25.0;
+              final double riderEarning =
+                  (order['riderPayout'] as num?)?.toDouble() ??
+                  (order['riderEarnings'] as num?)?.toDouble() ??
+                  (hasSurcharge ? 19.0 : 16.0);
+
+              return Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    'Order total: ₹$total',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 9,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: hasSurcharge
+                          ? const Color(0xFFEFF6FF)
+                          : Colors.green.shade50,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: hasSurcharge
+                            ? const Color(0xFF93C5FD)
+                            : Colors.green.shade200,
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          hasSurcharge ? '🌧️' : '💰',
+                          style: const TextStyle(fontSize: 11),
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          hasSurcharge
+                              ? 'Earn ₹${riderEarning.toInt()} Surge'
+                              : 'Earn ₹${riderEarning.toInt()}',
+                          style: TextStyle(
+                            color: hasSurcharge
+                                ? const Color(0xFF1D4ED8)
+                                : Colors.green,
+                            fontWeight: FontWeight.w900,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+
+          const SizedBox(height: 12),
+
+          // ==================================================
+          // ACCEPT (FOR UNASSIGNED ORDERS)
+          // ==================================================
+          if (unassigned)
+            SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: ElevatedButton.icon(
+                onPressed: processing
+                    ? null
+                    : () async {
+                        await _claimOrder(orderId);
+                      },
+                icon: processing
+                    ? const SizedBox(
+                        width: 19,
+                        height: 19,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.assignment_ind_outlined),
+                label: Text(
+                  processing ? 'ACCEPTING...' : 'ACCEPT DELIVERY',
+                  style: const TextStyle(fontWeight: FontWeight.w900),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.indigo,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+              ),
+            )
+          // ==================================================
+          // MY DELIVERY ACTIONS
+          // ==================================================
+          else
+            Column(
+              children: [
+                // If not yet picked up: show Store Map & Customer Map
+                if (statusLower == 'assigned to rider' ||
+                    statusLower == 'placed' ||
+                    statusLower == 'confirmed') ...[
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: () => _openMap(
+                            orderId,
+                            order,
+                            focusStore: true,
+                          ),
+                          icon: const Icon(
+                            Icons.storefront_outlined,
+                            size: 16,
+                          ),
+                          label: const Text(
+                            'STORE MAP',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: const Color(0xFF4F46E5),
+                            side: const BorderSide(color: Color(0xFF4F46E5)),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: () => _openMap(
+                            orderId,
+                            order,
+                            focusStore: false,
+                          ),
+                          icon: const Icon(Icons.map_outlined, size: 16),
+                          label: const Text(
+                            'CUSTOMER',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                      ),
+                      if (phone.isNotEmpty) ...[
+                        const SizedBox(width: 8),
+                        IconButton(
+                          onPressed: () => _callCustomer(phone),
+                          icon: const Icon(Icons.phone_outlined, size: 20),
+                          color: Colors.green,
+                          tooltip: 'Call Customer',
+                        ),
+                      ],
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 48,
+                    child: ElevatedButton.icon(
+                      onPressed: processing
+                          ? null
+                          : () => _updateStatus(
+                              orderId: orderId,
+                              status: 'Picked Up',
+                            ),
+                      icon: const Icon(Icons.inventory_2_outlined),
+                      label: const Text(
+                        'MARK PICKED UP FROM STORE',
+                        style: TextStyle(fontWeight: FontWeight.w900),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.teal,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                    ),
+                  ),
+                ] else ...[
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: phone.isEmpty
+                              ? null
+                              : () => _callCustomer(phone),
+                          icon: const Icon(Icons.phone_outlined, size: 18),
+                          label: const Text('CALL'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: () => _openMap(
+                            orderId,
+                            order,
+                            focusStore: false,
+                          ),
+                          icon: const Icon(Icons.map_outlined, size: 18),
+                          label: const Text('MAP'),
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  // PICKED UP → OUT FOR DELIVERY
+                  if (statusLower == 'picked up') ...[
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 48,
+                      child: ElevatedButton.icon(
+                        onPressed: processing
+                            ? null
+                            : () async {
+                                await _startDeliveryTracking(orderId);
+                              },
+                        icon: const Icon(Icons.location_on_outlined),
+                        label: const Text(
+                          'START DELIVERY TO CUSTOMER',
+                          style: TextStyle(fontWeight: FontWeight.w900),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green,
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+
+                  // OUT FOR DELIVERY → DELIVERED
+                  if (statusLower == 'out for delivery') ...[
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 48,
+                      child: ElevatedButton(
+                        onPressed: processing
+                            ? null
+                            : () async {
+                                await _updateStatus(
+                                  orderId: orderId,
+                                  status: 'Delivered',
+                                );
+
+                                if (mounted) {
+                                  await DeliveryTrackingService.instance
+                                      .stopAfterDelivered(orderId: orderId);
+                                }
+                              },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green,
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                        ),
+                        child: const Text(
+                          'MARK DELIVERED',
+                          style: TextStyle(fontWeight: FontWeight.w900),
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ],
+            ),
+        ],
+      ),
+    );
   }
 
   // ==========================================================
   // DISPOSE
   // ==========================================================
-}
-
-// =============================================================
-// ANIMATED RIDER CARD
-// =============================================================
-
-class _AnimatedRiderCard extends StatefulWidget {
-  final Widget child;
-  final int index;
-
-  const _AnimatedRiderCard({
-    super.key,
-    required this.child,
-    required this.index,
-  });
-
-  @override
-  State<_AnimatedRiderCard> createState() => _AnimatedRiderCardState();
-}
-
-class _AnimatedRiderCardState extends State<_AnimatedRiderCard>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-
-  late final Animation<double> _fadeAnimation;
-
-  late final Animation<Offset> _slideAnimation;
-
-  @override
-  void initState() {
-    super.initState();
-
-    _controller = AnimationController(
-      vsync: this,
-      duration: Duration(milliseconds: 350 + (widget.index * 60)),
-    );
-
-    _fadeAnimation = CurvedAnimation(
-      parent: _controller,
-      curve: Curves.easeOut,
-    );
-
-    _slideAnimation = Tween<Offset>(
-      begin: const Offset(0, 0.06),
-      end: Offset.zero,
-    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic));
-
-    _controller.forward();
-  }
 
   @override
   void dispose() {
-    _controller.dispose();
+    WidgetsBinding.instance.removeObserver(this);
+
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+
+    _availabilityPositionSubscription?.cancel();
+
+    _deliveryOfferSubscription?.cancel();
+
+    _notificationService.dispose();
+
     super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return FadeTransition(
-      opacity: _fadeAnimation,
-      child: SlideTransition(position: _slideAnimation, child: widget.child),
-    );
-  }
-}
-
-// =============================================================
-// SLIDE TO DELIVER
-// =============================================================
-
-class _SlideToDeliver extends StatefulWidget {
-  final Future<void> Function() onDelivered;
-
-  const _SlideToDeliver({required this.onDelivered});
-
-  @override
-  State<_SlideToDeliver> createState() => _SlideToDeliverState();
-}
-
-class _SlideToDeliverState extends State<_SlideToDeliver> {
-  double position = 0;
-
-  bool completed = false;
-
-  bool loading = false;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: double.infinity,
-
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          const double height = 64;
-
-          const double knobSize = 56;
-
-          final maxPosition = constraints.maxWidth - knobSize - 4;
-
-          return Container(
-            height: height,
-
-            decoration: BoxDecoration(
-              color: Colors.green.shade50,
-              borderRadius: BorderRadius.circular(32),
-              border: Border.all(color: Colors.green, width: 1.5),
-            ),
-
-            child: Stack(
-              alignment: Alignment.center,
-
-              children: [
-                // ==========================================
-                // SLIDE TEXT
-                // ==========================================
-                AnimatedOpacity(
-                  duration: const Duration(milliseconds: 200),
-                  opacity: completed ? 0 : 1,
-
-                  child: const Text(
-                    'SLIDE TO DELIVER',
-                    style: TextStyle(
-                      color: Colors.green,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 1,
-                    ),
-                  ),
-                ),
-
-                // ==========================================
-                // LOADING / COMPLETED
-                // ==========================================
-                if (loading)
-                  const SizedBox(
-                    width: 22,
-                    height: 22,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2.5,
-                      color: Colors.green,
-                    ),
-                  )
-                else if (completed)
-                  const Text(
-                    'DELIVERED ✓',
-                    style: TextStyle(
-                      color: Colors.green,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 16,
-                    ),
-                  ),
-
-                // ==========================================
-                // SLIDER KNOB
-                // ==========================================
-                AnimatedPositioned(
-                  duration: const Duration(milliseconds: 150),
-
-                  curve: Curves.easeOut,
-
-                  left: position + 2,
-
-                  child: GestureDetector(
-                    onHorizontalDragUpdate: (details) {
-                      if (completed || loading) {
-                        return;
-                      }
-
-                      setState(() {
-                        position += details.delta.dx;
-
-                        if (position < 0) {
-                          position = 0;
-                        }
-
-                        if (position > maxPosition) {
-                          position = maxPosition;
-                        }
-                      });
-                    },
-
-                    onHorizontalDragEnd: (_) async {
-                      if (completed || loading) {
-                        return;
-                      }
-
-                      if (position >= maxPosition * 0.85) {
-                        setState(() {
-                          position = maxPosition;
-
-                          loading = true;
-                        });
-
-                        try {
-                          await widget.onDelivered();
-
-                          if (!mounted) {
-                            return;
-                          }
-
-                          setState(() {
-                            completed = true;
-
-                            loading = false;
-                          });
-                        } catch (e) {
-                          if (!mounted) {
-                            return;
-                          }
-
-                          setState(() {
-                            position = 0;
-                            loading = false;
-                          });
-
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text('Unable to complete delivery: $e'),
-                              backgroundColor: Colors.red,
-                            ),
-                          );
-                        }
-                      } else {
-                        setState(() {
-                          position = 0;
-                        });
-                      }
-                    },
-
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 100),
-
-                      width: knobSize,
-
-                      height: knobSize,
-
-                      decoration: const BoxDecoration(
-                        color: Colors.green,
-                        shape: BoxShape.circle,
-                      ),
-
-                      child: Icon(
-                        completed
-                            ? Icons.check
-                            : loading
-                            ? Icons.hourglass_top
-                            : Icons.chevron_right,
-
-                        color: Colors.white,
-
-                        size: 32,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          );
-        },
-      ),
-    );
   }
 }

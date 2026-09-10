@@ -43,3 +43,21 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Node dependencies
+node_modules/
+**/node_modules/
+package-lock.json
+
+# Signing & Secrets
+*.jks
+*.keystore
+key.properties
+**/key.properties
+local.properties
+**/local.properties
+
+# Build & caches
+**/build/
+.freebuff/
+package.json

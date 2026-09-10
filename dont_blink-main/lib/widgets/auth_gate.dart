@@ -1,11 +1,14 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import '../theme/app_colors.dart';
 
 import '../screens/main_screen.dart';
 import '../screens/signin_screen.dart';
 import '../screens/rider_home_screen.dart';
 import '../screens/admin_screen.dart';
+import '../screens/store_manager_screen.dart';
+import '../services/notification_service.dart';
 
 class AuthGate extends StatefulWidget {
   const AuthGate({super.key});
@@ -57,21 +60,20 @@ class _AuthGateState extends State<AuthGate> {
 
         if (_lastUser?.uid != user.uid) {
           _lastUser = user;
+          _role = null;
 
           _loadRole(user);
         }
 
         // ======================================================
-        // CUSTOMER DEFAULT
-        //
-        // This is intentionally MainScreen.
-        //
-        // Therefore normal customers go directly to the
-        // customer app instead of seeing a loading screen.
+        // LOADING USER ROLE
         // ======================================================
 
         if (_role == null) {
-          return const MainScreen();
+          return const Scaffold(
+            backgroundColor: Color(0xffF7F8FA),
+            body: Center(child: CircularProgressIndicator(color: AppColors.primary)),
+          );
         }
 
         // ======================================================
@@ -80,6 +82,20 @@ class _AuthGateState extends State<AuthGate> {
 
         if (_role == 'rider') {
           return const RiderHomeScreen();
+        }
+
+        // ======================================================
+        // STORE MANAGER
+        //
+        // Firestore:
+        // role = "storeManager"
+        //
+        // _loadRole() converts it to lowercase:
+        // "storeManager" → "storemanager"
+        // ======================================================
+
+        if (_role == 'storemanager') {
+          return const StoreManagerScreen();
         }
 
         // ======================================================
@@ -120,6 +136,11 @@ class _AuthGateState extends State<AuthGate> {
 
       setState(() {
         _role = role ?? 'customer';
+      });
+
+      // Ensure FCM token is always fresh and stored in Firestore for this user
+      NotificationService.refreshUserToken().catchError((e) {
+        debugPrint('Failed to refresh FCM token in AuthGate: $e');
       });
     } catch (e) {
       debugPrint('AuthGate role error: $e');

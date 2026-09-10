@@ -196,7 +196,7 @@ class _SplashScreenState extends State<SplashScreen>
                   fontWeight: FontWeight.w700,
                   letterSpacing: -1.8,
                   height: 1.0,
-                  color: const Color(0xff08783F),
+                  color: const Color(0xFF116A34),
                 ),
               ),
 
@@ -494,8 +494,8 @@ class _CartLogoPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    const Color green = Color(0xff08A84F);
-    const Color darkGreen = Color(0xff08783F);
+    const Color green = Color(0xFF168A43);
+    const Color darkGreen = Color(0xFF116A34);
 
     final double scaleX = size.width / 180;
 
@@ -746,7 +746,7 @@ class _BottomWavePainter extends CustomPainter {
     // ==========================================================
 
     final Paint greenPaint = Paint()
-      ..color = const Color(0xff08A84F)
+      ..color = const Color(0xFF168A43)
       ..style = PaintingStyle.fill;
 
     final Path greenPath = Path();

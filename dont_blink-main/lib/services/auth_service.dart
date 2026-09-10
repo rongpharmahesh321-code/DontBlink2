@@ -3,54 +3,27 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
 class AuthService {
-  // ==========================================================
-  // FIREBASE
-  // ==========================================================
-
   final FirebaseAuth _auth = FirebaseAuth.instance;
-
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-
-  // ==========================================================
-  // GOOGLE SIGN-IN
-  // ==========================================================
 
   final GoogleSignIn _googleSignIn = GoogleSignIn.instance;
 
   static const String _serverClientId =
-      '522053783800-bu8s55cifjeiult2kgabr6mhjo62ma8m.apps.googleusercontent.com';
+      '522053783800-ciaa79ba792l26e2mgo6htda1jk263bf.apps.googleusercontent.com';
 
   bool _googleInitialized = false;
 
-  // ==========================================================
-  // CURRENT USER
-  // ==========================================================
-
   User? get currentUser => _auth.currentUser;
-
-  // ==========================================================
-  // AUTH STATE
-  // ==========================================================
 
   Stream<User?> get authStateChanges => _auth.authStateChanges();
 
-  // ==========================================================
-  // INITIALIZE GOOGLE
-  // ==========================================================
-
   Future<void> _initializeGoogle() async {
-    if (_googleInitialized) {
-      return;
-    }
+    if (_googleInitialized) return;
 
     await _googleSignIn.initialize(serverClientId: _serverClientId);
 
     _googleInitialized = true;
   }
-
-  // ==========================================================
-  // GOOGLE SIGN-IN
-  // ==========================================================
 
   Future<void> signInWithGoogle() async {
     try {
@@ -71,27 +44,20 @@ class AuthService {
       );
 
       await _auth.signInWithCredential(credential);
-
       await createUserIfNeeded();
     } on GoogleSignInException catch (e) {
-      throw Exception(
-        'Google Sign-In failed: '
-        '${e.description ?? e.code.name}',
-      );
-    } on FirebaseAuthException catch (e) {
-      throw Exception(e.message ?? 'Firebase authentication failed.');
-    } catch (e) {
-      throw Exception('Google Sign-In failed: $e');
+      print('================ GOOGLE SIGN-IN ERROR ================');
+      print('ERROR: $e');
+      print('CODE: ${e.code}');
+      print('DESCRIPTION: ${e.description}');
+      print('=======================================================');
+
+      throw Exception('Google Sign-In failed: ${e.description ?? e.code.name}');
     }
   }
 
   // ==========================================================
   // NORMAL PHONE LOGIN
-  //
-  // Used by SignInScreen.
-  //
-  // If the user is not logged in, this signs them in
-  // using phone authentication.
   // ==========================================================
 
   Future<void> sendOtp({
@@ -103,44 +69,31 @@ class AuthService {
     await _auth.verifyPhoneNumber(
       phoneNumber: phoneNumber,
 
-      // ------------------------------------------------------
-      // AUTOMATIC VERIFICATION
-      // ------------------------------------------------------
       verificationCompleted: (PhoneAuthCredential credential) async {
         try {
-          final User? user = _auth.currentUser;
-
-          if (user == null) {
-            await _auth.signInWithCredential(credential);
-          } else {
-            await user.linkWithCredential(credential);
-          }
-
+          // LOGIN: never link the phone credential here.
+          await _auth.signInWithCredential(credential);
           await createUserIfNeeded();
+        } on FirebaseAuthException catch (e) {
+          onError(_friendlyAuthError(e));
         } catch (e) {
           onError(e.toString());
         }
       },
 
-      // ------------------------------------------------------
-      // VERIFICATION FAILED
-      // ------------------------------------------------------
       verificationFailed: (FirebaseAuthException e) {
+        print('PHONE AUTH ERROR CODE: ${e.code}');
+        print('PHONE AUTH ERROR MESSAGE: ${e.message}');
+        print('PHONE AUTH ERROR FULL: $e');
+
         onError(_friendlyAuthError(e));
       },
 
-      // ------------------------------------------------------
-      // OTP SENT
-      // ------------------------------------------------------
       codeSent: (String verificationId, int? resendToken) {
         onResendToken?.call(resendToken);
-
         onCodeSent(verificationId);
       },
 
-      // ------------------------------------------------------
-      // TIMEOUT
-      // ------------------------------------------------------
       codeAutoRetrievalTimeout: (_) {},
     );
   }
@@ -161,15 +114,11 @@ class AuthService {
 
       verificationCompleted: (PhoneAuthCredential credential) async {
         try {
-          final User? user = _auth.currentUser;
-
-          if (user == null) {
-            await _auth.signInWithCredential(credential);
-          } else {
-            await user.linkWithCredential(credential);
-          }
-
+          // LOGIN: never link the phone credential here.
+          await _auth.signInWithCredential(credential);
           await createUserIfNeeded();
+        } on FirebaseAuthException catch (e) {
+          onError(_friendlyAuthError(e));
         } catch (e) {
           onError(e.toString());
         }
@@ -181,12 +130,10 @@ class AuthService {
 
       codeSent: (String verificationId, int? newResendToken) {
         onResendToken?.call(newResendToken);
-
         onCodeSent(verificationId);
       },
 
       forceResendingToken: resendToken,
-
       codeAutoRetrievalTimeout: (_) {},
     );
   }
@@ -199,40 +146,50 @@ class AuthService {
     required String verificationId,
     required String otp,
   }) async {
+    // If the user has already been signed in by auto-retrieval / instant verification
+    if (_auth.currentUser != null) {
+      await createUserIfNeeded();
+      return;
+    }
+
     try {
       final PhoneAuthCredential credential = PhoneAuthProvider.credential(
         verificationId: verificationId,
         smsCode: otp,
       );
 
-      final User? user = _auth.currentUser;
+      // IMPORTANT:
+      // This is a normal LOGIN flow.
+      // Do NOT use linkWithCredential().
+      final UserCredential userCredential = await _auth.signInWithCredential(
+        credential,
+      );
 
-      if (user == null) {
-        await _auth.signInWithCredential(credential);
-      } else {
-        await user.linkWithCredential(credential);
+      if (userCredential.user == null) {
+        throw Exception('Unable to sign in. Please try again.');
       }
 
+      // Existing users are valid. This only creates the
+      // Firestore profile when missing and updates it otherwise.
       await createUserIfNeeded();
     } on FirebaseAuthException catch (e) {
+      // If auto-retrieval completed right during this call, verify if user is now signed in
+      if (_auth.currentUser != null) {
+        await createUserIfNeeded();
+        return;
+      }
       throw Exception(_friendlyAuthError(e));
+    } catch (e) {
+      if (_auth.currentUser != null) {
+        await createUserIfNeeded();
+        return;
+      }
+      throw Exception(e.toString().replaceFirst('Exception: ', ''));
     }
   }
 
   // ==========================================================
   // CHECKOUT PHONE OTP
-  //
-  // IMPORTANT:
-  //
-  // This is DIFFERENT from normal phone login.
-  //
-  // The customer is already logged in with:
-  //
-  // - Email/password
-  // - Google
-  //
-  // We verify the new phone and LINK it to the
-  // existing Firebase account.
   // ==========================================================
 
   Future<void> sendOtpForCurrentUser({
@@ -245,40 +202,31 @@ class AuthService {
 
     if (user == null) {
       onError('Please login before adding your phone number.');
-
       return;
     }
-
-    // --------------------------------------------------------
-    // ALREADY LINKED
-    // --------------------------------------------------------
 
     final existingPhone = user.phoneNumber?.trim() ?? '';
 
     if (existingPhone.isNotEmpty) {
       onError('A phone number is already linked to this account.');
-
       return;
     }
 
     await _auth.verifyPhoneNumber(
       phoneNumber: phoneNumber,
 
-      // ------------------------------------------------------
-      // AUTOMATIC VERIFICATION
-      // ------------------------------------------------------
       verificationCompleted: (PhoneAuthCredential credential) async {
         try {
           final User? currentUser = _auth.currentUser;
 
           if (currentUser == null) {
             onError('Your session expired. Please login again.');
-
             return;
           }
 
+          // This flow is specifically for adding a phone to
+          // an already logged-in account, so LINK is correct.
           await currentUser.linkWithCredential(credential);
-
           await createUserIfNeeded();
         } on FirebaseAuthException catch (e) {
           onError(_friendlyAuthError(e));
@@ -287,33 +235,21 @@ class AuthService {
         }
       },
 
-      // ------------------------------------------------------
-      // FAILED
-      // ------------------------------------------------------
       verificationFailed: (FirebaseAuthException e) {
         onError(_friendlyAuthError(e));
       },
 
-      // ------------------------------------------------------
-      // OTP SENT
-      // ------------------------------------------------------
       codeSent: (String verificationId, int? resendToken) {
         onResendToken?.call(resendToken);
-
         onCodeSent(verificationId);
       },
 
-      // ------------------------------------------------------
-      // TIMEOUT
-      // ------------------------------------------------------
       codeAutoRetrievalTimeout: (_) {},
     );
   }
 
   // ==========================================================
   // VERIFY CHECKOUT OTP
-  //
-  // Links the verified phone to the CURRENT account.
   // ==========================================================
 
   Future<void> verifyOtpAndLinkPhone({
@@ -332,21 +268,8 @@ class AuthService {
         smsCode: otp,
       );
 
-      // ------------------------------------------------------
-      // LINK TO EXISTING ACCOUNT
-      // ------------------------------------------------------
-
       await user.linkWithCredential(credential);
-
-      // ------------------------------------------------------
-      // REFRESH USER
-      // ------------------------------------------------------
-
       await user.reload();
-
-      // ------------------------------------------------------
-      // SAVE TO FIRESTORE
-      // ------------------------------------------------------
 
       final User? refreshedUser = _auth.currentUser;
 
@@ -366,17 +289,12 @@ class AuthService {
 
   // ==========================================================
   // GET SAVED PHONE
-  //
-  // First checks Firebase Authentication.
-  // Then checks Firestore.
   // ==========================================================
 
   Future<String?> getSavedPhoneNumber() async {
     final User? user = _auth.currentUser;
 
-    if (user == null) {
-      return null;
-    }
+    if (user == null) return null;
 
     final authPhone = user.phoneNumber?.trim() ?? '';
 
@@ -387,7 +305,6 @@ class AuthService {
     final snapshot = await _firestore.collection('users').doc(user.uid).get();
 
     final data = snapshot.data();
-
     final firestorePhone = data?['phone']?.toString().trim() ?? '';
 
     if (firestorePhone.isNotEmpty) {
@@ -404,9 +321,7 @@ class AuthService {
   Future<void> createUserIfNeeded() async {
     final User? user = _auth.currentUser;
 
-    if (user == null) {
-      return;
-    }
+    if (user == null) return;
 
     final userRef = _firestore.collection('users').doc(user.uid);
 
@@ -414,41 +329,25 @@ class AuthService {
 
     final authPhone = user.phoneNumber ?? '';
 
-    // --------------------------------------------------------
-    // NEW USER
-    // --------------------------------------------------------
-
     if (!snapshot.exists) {
       await userRef.set({
         'uid': user.uid,
-
         'email': user.email ?? '',
-
         'name': user.displayName ?? '',
-
         'phone': authPhone,
-
         'phoneVerified': authPhone.isNotEmpty,
-
         'photoUrl': user.photoURL ?? '',
-
         'role': 'customer',
-
         'createdAt': FieldValue.serverTimestamp(),
-
         'updatedAt': FieldValue.serverTimestamp(),
       });
 
       return;
     }
 
-    // --------------------------------------------------------
-    // EXISTING USER
-    // --------------------------------------------------------
-
+    // Existing user = normal success, NOT an error.
     final Map<String, dynamic> updates = {
       'uid': user.uid,
-
       'updatedAt': FieldValue.serverTimestamp(),
     };
 
@@ -466,7 +365,6 @@ class AuthService {
 
     if (authPhone.trim().isNotEmpty) {
       updates['phone'] = authPhone;
-
       updates['phoneVerified'] = true;
     }
 

@@ -93,7 +93,7 @@ class _SignInScreenState extends State<SignInScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Login Successful'),
-          backgroundColor: Color(0xff08A84F),
+          backgroundColor: Color(0xFF168A43),
         ),
       );
 
@@ -130,7 +130,7 @@ class _SignInScreenState extends State<SignInScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Google Sign-In Successful'),
-          backgroundColor: Color(0xff08A84F),
+          backgroundColor: Color(0xFF168A43),
         ),
       );
 
@@ -315,7 +315,7 @@ class _SignInScreenState extends State<SignInScreen> {
 
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(13),
-            borderSide: const BorderSide(color: Color(0xff08A84F), width: 1.5),
+            borderSide: const BorderSide(color: Color(0xFF168A43), width: 1.5),
           ),
 
           errorBorder: OutlineInputBorder(
@@ -416,7 +416,7 @@ class _SignInScreenState extends State<SignInScreen> {
                   style: const TextStyle(
                     fontSize: 15,
                     fontWeight: FontWeight.bold,
-                    color: Color(0xff08783F),
+                    color: Color(0xFF116A34),
                   ),
                 ),
 
@@ -438,7 +438,7 @@ class _SignInScreenState extends State<SignInScreen> {
 
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(13),
-          borderSide: const BorderSide(color: Color(0xff08A84F), width: 1.5),
+          borderSide: const BorderSide(color: Color(0xFF168A43), width: 1.5),
         ),
       ),
     );
@@ -456,7 +456,7 @@ class _SignInScreenState extends State<SignInScreen> {
       child: OutlinedButton.icon(
         onPressed: loading ? null : sendOtp,
 
-        icon: const Icon(Icons.phone_android, color: Color(0xff08783F)),
+        icon: const Icon(Icons.phone_android, color: Color(0xFF116A34)),
 
         label: const Text(
           'CONTINUE WITH PHONE OTP',
@@ -464,9 +464,9 @@ class _SignInScreenState extends State<SignInScreen> {
         ),
 
         style: OutlinedButton.styleFrom(
-          foregroundColor: const Color(0xff08783F),
+          foregroundColor: const Color(0xFF116A34),
 
-          side: const BorderSide(color: Color(0xff08783F)),
+          side: const BorderSide(color: Color(0xFF116A34)),
 
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(13),
@@ -557,7 +557,7 @@ class _SignInScreenState extends State<SignInScreen> {
                           fontSize: 32,
                           fontWeight: FontWeight.w700,
                           letterSpacing: -1.6,
-                          color: Color(0xff08783F),
+                          color: Color(0xFF116A34),
                         ),
                       ),
 
@@ -645,7 +645,7 @@ class _SignInScreenState extends State<SignInScreen> {
                           child: const Text(
                             'Forgot Password?',
                             style: TextStyle(
-                              color: Color(0xff08783F),
+                              color: Color(0xFF116A34),
                               fontWeight: FontWeight.w600,
                             ),
                           ),
@@ -665,7 +665,7 @@ class _SignInScreenState extends State<SignInScreen> {
                           onPressed: loading ? null : signIn,
 
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xff08A84F),
+                            backgroundColor: const Color(0xFF168A43),
 
                             foregroundColor: Colors.white,
 
@@ -762,7 +762,7 @@ class _SignInScreenState extends State<SignInScreen> {
                         child: const Text(
                           "Don't have an account? Sign Up",
                           style: TextStyle(
-                            color: Color(0xff08783F),
+                            color: Color(0xFF116A34),
                             fontWeight: FontWeight.w600,
                           ),
                         ),
@@ -786,9 +786,9 @@ class _SignInScreenState extends State<SignInScreen> {
 class _DoorsteppLogoPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
-    const Color green = Color(0xff08A84F);
+    const Color green = Color(0xFF168A43);
 
-    const Color darkGreen = Color(0xff08783F);
+    const Color darkGreen = Color(0xFF116A34);
 
     final double scaleX = size.width / 150;
 

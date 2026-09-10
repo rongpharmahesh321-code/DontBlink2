@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/painting.dart';
 
+import '../widgets/cached_product_image.dart';
 import 'product.dart';
 import 'cart_item.dart';
 
@@ -31,19 +33,36 @@ class Cart {
   // ADD TO CART
   // ==========================================================
 
-  static void add(Product product) {
-    for (var item in items) {
-      if (item.product.name == product.name) {
-        item.quantity++;
+  static bool add(Product product) {
+    if (!product.isAvailable || product.stock <= 0) {
+      return false;
+    }
 
+    final url = product.image.trim();
+    if (url.isNotEmpty) {
+      try {
+        CachedProductImage.provider(url)
+            .resolve(ImageConfiguration.empty)
+            .addListener(ImageStreamListener((_, _) {}, onError: (_, _) {}));
+      } catch (_) {}
+    }
+
+    for (final item in items) {
+      if (item.product.id == product.id) {
+        // The cart can never contain more units than current stock.
+        if (item.quantity >= product.stock) {
+          return false;
+        }
+
+        item.quantity++;
         _notifyChange();
-        return;
+        return true;
       }
     }
 
     items.add(CartItem(product: product));
-
     _notifyChange();
+    return true;
   }
 
   // ==========================================================
@@ -52,7 +71,7 @@ class Cart {
 
   static void remove(Product product) {
     for (int i = 0; i < items.length; i++) {
-      if (items[i].product.name == product.name) {
+      if (items[i].product.id == product.id) {
         if (items[i].quantity > 1) {
           items[i].quantity--;
         } else {
@@ -71,7 +90,7 @@ class Cart {
 
   static int getQuantity(Product product) {
     for (var item in items) {
-      if (item.product.name == product.name) {
+      if (item.product.id == product.id) {
         return item.quantity;
       }
     }

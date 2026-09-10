@@ -218,9 +218,9 @@ class _EditProductScreenState extends State<EditProductScreen> {
     try {
       final XFile? image = await _imagePicker.pickImage(
         source: ImageSource.gallery,
-        imageQuality: 85,
-        maxWidth: 1200,
-        maxHeight: 1200,
+        imageQuality: 62,
+        maxWidth: 720,
+        maxHeight: 720,
       );
 
       if (image == null) {
@@ -293,7 +293,10 @@ class _EditProductScreenState extends State<EditProductScreen> {
         .child(widget.productId)
         .child(fileName);
 
-    final metadata = SettableMetadata(contentType: 'image/jpeg');
+    final metadata = SettableMetadata(
+      contentType: 'image/jpeg',
+      cacheControl: 'public,max-age=31536000,immutable',
+    );
 
     final uploadTask = storageReference.putFile(file, metadata);
 

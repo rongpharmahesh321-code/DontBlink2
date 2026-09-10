@@ -4,6 +4,7 @@ class Product {
   final String price;
   final String image;
   final String category;
+  final String subCategory;
   final String description;
 
   // ==========================================================
@@ -61,6 +62,8 @@ class Product {
     required this.price,
     required this.image,
     required this.category,
+
+    this.subCategory = '',
 
     this.description = '',
 
@@ -139,6 +142,15 @@ class Product {
     );
 
     // --------------------------------------------------------
+    // SUBCATEGORY
+    // --------------------------------------------------------
+
+    final String subCategory = _toString(
+      data['subCategory'],
+      fallback: _toString(data['subcategory']),
+    );
+
+    // --------------------------------------------------------
     // RETURN PRODUCT
     // --------------------------------------------------------
 
@@ -152,6 +164,8 @@ class Product {
       image: _toString(data['image']),
 
       category: _toString(data['category']),
+
+      subCategory: subCategory,
 
       description: _toString(data['description']),
 
@@ -203,6 +217,8 @@ class Product {
 
       'category': category,
 
+      'subCategory': subCategory,
+
       'description': description,
 
       'sellingUnit': sellingUnit,
@@ -234,6 +250,7 @@ class Product {
     String? price,
     String? image,
     String? category,
+    String? subCategory,
     String? description,
     String? sellingUnit,
     double? rating,
@@ -253,6 +270,8 @@ class Product {
       image: image ?? this.image,
 
       category: category ?? this.category,
+
+      subCategory: subCategory ?? this.subCategory,
 
       description: description ?? this.description,
 

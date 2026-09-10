@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../theme/app_colors.dart';
 
 class AddressCard extends StatelessWidget {
   final String title;
@@ -20,8 +21,8 @@ class AddressCard extends StatelessWidget {
       child: ListTile(
         contentPadding: const EdgeInsets.all(16),
         leading: const CircleAvatar(
-          backgroundColor: Color(0xFFE8F5E9),
-          child: Icon(Icons.location_on, color: Colors.green),
+          backgroundColor: AppColors.tintGreen,
+          child: Icon(Icons.location_on, color: AppColors.primary),
         ),
         title: Text(
           title,

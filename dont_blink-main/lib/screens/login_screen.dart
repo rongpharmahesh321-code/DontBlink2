@@ -57,7 +57,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   fontSize: 38,
                   fontWeight: FontWeight.w700,
                   letterSpacing: -1.8,
-                  color: Color(0xff08783F),
+                  color: Color(0xFF116A34),
                 ),
               ),
 
@@ -96,7 +96,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   prefixText: '+91 ',
 
                   prefixStyle: const TextStyle(
-                    color: Color(0xff08783F),
+                    color: Color(0xFF116A34),
                     fontWeight: FontWeight.w600,
                   ),
 
@@ -122,7 +122,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   focusedBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(15),
                     borderSide: const BorderSide(
-                      color: Color(0xff08A84F),
+                      color: Color(0xFF168A43),
                       width: 1.5,
                     ),
                   ),
@@ -140,7 +140,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
                 child: ElevatedButton(
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xff08A84F),
+                    backgroundColor: const Color(0xFF168A43),
 
                     foregroundColor: Colors.white,
 
@@ -264,8 +264,8 @@ class _LoginScreenState extends State<LoginScreen> {
 class _DoorsteppLogoPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
-    const Color green = Color(0xff08A84F);
-    const Color darkGreen = Color(0xff08783F);
+    const Color green = Color(0xFF168A43);
+    const Color darkGreen = Color(0xFF116A34);
 
     final double scaleX = size.width / 150;
     final double scaleY = size.height / 125;

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../theme/app_colors.dart';
 
 class PriceRow extends StatelessWidget {
   final String title;
@@ -33,7 +34,7 @@ class PriceRow extends StatelessWidget {
             style: TextStyle(
               fontSize: isTotal ? 18 : 16,
               fontWeight: isTotal ? FontWeight.bold : FontWeight.w600,
-              color: valueColor ?? Colors.green,
+              color: valueColor ?? AppColors.primary,
             ),
           ),
         ],

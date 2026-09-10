@@ -1,9 +1,13 @@
 import 'dart:async';
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:pinput/pinput.dart';
 
 import '../services/auth_service.dart';
+import '../services/notification_service.dart';
+import '../theme/app_colors.dart';
+import '../widgets/auth_gate.dart';
 
 class OtpScreen extends StatefulWidget {
   final String phoneNumber;
@@ -37,8 +41,8 @@ class _OtpScreenState extends State<OtpScreen> {
   // ==========================================================
 
   bool loading = false;
-
   bool resending = false;
+  bool _navigated = false;
 
   late String verificationId;
 
@@ -47,6 +51,7 @@ class _OtpScreenState extends State<OtpScreen> {
   int resendSeconds = 60;
 
   Timer? resendTimer;
+  StreamSubscription<User?>? _authSubscription;
 
   // ==========================================================
   // INIT
@@ -59,6 +64,13 @@ class _OtpScreenState extends State<OtpScreen> {
     verificationId = widget.verificationId;
 
     _startResendTimer();
+
+    // Listen for automatic background verification (instant verification / SMS auto-retrieval)
+    _authSubscription = FirebaseAuth.instance.authStateChanges().listen((user) {
+      if (user != null && mounted && !_navigated) {
+        _onLoginSuccess();
+      }
+    });
   }
 
   // ==========================================================
@@ -68,9 +80,7 @@ class _OtpScreenState extends State<OtpScreen> {
   void _startResendTimer() {
     resendTimer?.cancel();
 
-    setState(() {
-      resendSeconds = 60;
-    });
+    resendSeconds = 60;
 
     resendTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (!mounted) {
@@ -95,6 +105,35 @@ class _OtpScreenState extends State<OtpScreen> {
   }
 
   // ==========================================================
+  // ON LOGIN SUCCESS
+  // ==========================================================
+
+  Future<void> _onLoginSuccess() async {
+    if (_navigated || !mounted) {
+      return;
+    }
+    _navigated = true;
+
+    try {
+      await NotificationService.refreshUserToken();
+    } catch (notificationError) {
+      debugPrint(
+        'Notification token registration failed: '
+        '$notificationError',
+      );
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const AuthGate()),
+      (route) => false,
+    );
+  }
+
+  // ==========================================================
   // VERIFY OTP
   // ==========================================================
 
@@ -112,27 +151,32 @@ class _OtpScreenState extends State<OtpScreen> {
       return;
     }
 
+    if (loading || _navigated) {
+      return;
+    }
+
     setState(() {
       loading = true;
     });
 
     try {
+      // ======================================================
+      // FIREBASE AUTHENTICATION
+      // ======================================================
+
       await authService.verifyOtp(verificationId: verificationId, otp: otp);
 
-      if (!mounted) return;
-
-      // ======================================================
-      // IMPORTANT
-      //
-      // FirebaseAuth is now signed in.
-      //
-      // Return to the root AuthGate.
-      // AuthGate will automatically display MainScreen.
-      // ======================================================
-
-      Navigator.of(context).popUntil((route) => route.isFirst);
+      await _onLoginSuccess();
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
+
+      // If user is already signed in (e.g. background auto-retrieval completed)
+      if (FirebaseAuth.instance.currentUser != null) {
+        await _onLoginSuccess();
+        return;
+      }
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -141,10 +185,9 @@ class _OtpScreenState extends State<OtpScreen> {
         ),
       );
 
-      // Clear incorrect OTP.
       otpController.clear();
     } finally {
-      if (mounted) {
+      if (mounted && !_navigated) {
         setState(() {
           loading = false;
         });
@@ -172,7 +215,9 @@ class _OtpScreenState extends State<OtpScreen> {
         resendToken: resendToken,
 
         onCodeSent: (newVerificationId) {
-          if (!mounted) return;
+          if (!mounted) {
+            return;
+          }
 
           setState(() {
             verificationId = newVerificationId;
@@ -186,13 +231,15 @@ class _OtpScreenState extends State<OtpScreen> {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text('A new OTP has been sent'),
-              backgroundColor: Colors.green,
+              backgroundColor: AppColors.primary,
             ),
           );
         },
 
         onResendToken: (newToken) {
-          if (!mounted) return;
+          if (!mounted) {
+            return;
+          }
 
           setState(() {
             resendToken = newToken;
@@ -200,7 +247,9 @@ class _OtpScreenState extends State<OtpScreen> {
         },
 
         onError: (error) {
-          if (!mounted) return;
+          if (!mounted) {
+            return;
+          }
 
           setState(() {
             resending = false;
@@ -212,7 +261,9 @@ class _OtpScreenState extends State<OtpScreen> {
         },
       );
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
         resending = false;
@@ -233,6 +284,7 @@ class _OtpScreenState extends State<OtpScreen> {
 
   @override
   void dispose() {
+    _authSubscription?.cancel();
     resendTimer?.cancel();
 
     otpController.dispose();
@@ -247,22 +299,14 @@ class _OtpScreenState extends State<OtpScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.deepPurple,
+      backgroundColor: Colors.white,
 
-      // ======================================================
-      // APP BAR
-      // ======================================================
       appBar: AppBar(
-        backgroundColor: Colors.deepPurple,
-
-        foregroundColor: Colors.white,
-
+        backgroundColor: Colors.white,
+        foregroundColor: AppColors.primary,
         elevation: 0,
       ),
 
-      // ======================================================
-      // BODY
-      // ======================================================
       body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
@@ -276,9 +320,41 @@ class _OtpScreenState extends State<OtpScreen> {
               // ==================================================
               // ICON
               // ==================================================
-              const Icon(Icons.sms, size: 80, color: Colors.white),
+              Column(
+                children: [
+                  SizedBox(
+                    width: 125,
+                    height: 105,
+                    child: CustomPaint(painter: _DoorsteppLogoPainter()),
+                  ),
 
-              const SizedBox(height: 20),
+                  const SizedBox(height: 2),
+
+                  const Text(
+                    'doorstepp',
+                    style: TextStyle(
+                      fontSize: 32,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: -1.6,
+                      color: AppColors.primaryDark,
+                    ),
+                  ),
+
+                  const SizedBox(height: 6),
+
+                  const Text(
+                    'Groceries Delivered in Minutes',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: Colors.grey,
+                    ),
+                  ),
+
+                  const SizedBox(height: 24),
+                ],
+              ),
 
               // ==================================================
               // TITLE
@@ -286,7 +362,7 @@ class _OtpScreenState extends State<OtpScreen> {
               const Text(
                 'Verify OTP',
                 style: TextStyle(
-                  color: Colors.white,
+                  color: AppColors.primary,
                   fontSize: 30,
                   fontWeight: FontWeight.bold,
                 ),
@@ -300,8 +376,7 @@ class _OtpScreenState extends State<OtpScreen> {
               Text(
                 'OTP sent to\n${widget.phoneNumber}',
                 textAlign: TextAlign.center,
-
-                style: const TextStyle(color: Colors.white70, fontSize: 15),
+                style: const TextStyle(color: Colors.grey, fontSize: 15),
               ),
 
               const SizedBox(height: 40),
@@ -326,42 +401,33 @@ class _OtpScreenState extends State<OtpScreen> {
 
                 defaultPinTheme: PinTheme(
                   width: 50,
-
                   height: 55,
 
                   textStyle: const TextStyle(
                     fontSize: 22,
-
                     fontWeight: FontWeight.bold,
-
-                    color: Colors.deepPurple,
+                    color: AppColors.primary,
                   ),
 
                   decoration: BoxDecoration(
-                    color: Colors.white,
-
+                    color: const Color(0xffF5F8F6),
                     borderRadius: BorderRadius.circular(12),
                   ),
                 ),
 
                 focusedPinTheme: PinTheme(
                   width: 50,
-
                   height: 55,
 
                   textStyle: const TextStyle(
                     fontSize: 22,
-
                     fontWeight: FontWeight.bold,
-
-                    color: Colors.deepPurple,
+                    color: AppColors.primary,
                   ),
 
                   decoration: BoxDecoration(
-                    color: Colors.white,
-
+                    color: const Color(0xffF5F8F6),
                     borderRadius: BorderRadius.circular(12),
-
                     border: Border.all(color: Colors.white, width: 2),
                   ),
                 ),
@@ -370,13 +436,12 @@ class _OtpScreenState extends State<OtpScreen> {
               const SizedBox(height: 30),
 
               // ==================================================
-              // RESEND SECTION
+              // RESEND
               // ==================================================
               if (resendSeconds > 0)
                 Text(
                   'Resend OTP in ${resendSeconds}s',
-
-                  style: const TextStyle(color: Colors.white70, fontSize: 14),
+                  style: const TextStyle(color: Colors.grey, fontSize: 14),
                 )
               else
                 TextButton.icon(
@@ -385,23 +450,22 @@ class _OtpScreenState extends State<OtpScreen> {
                   icon: resending
                       ? const SizedBox(
                           width: 16,
-
                           height: 16,
-
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
-
                             color: Colors.white,
                           ),
                         )
-                      : const Icon(Icons.refresh, color: Colors.white),
+                      : const Icon(
+                          Icons.refresh,
+                          color: AppColors.primary,
+                        ),
 
                   label: Text(
                     resending ? 'SENDING OTP...' : 'RESEND OTP',
 
                     style: const TextStyle(
-                      color: Colors.white,
-
+                      color: AppColors.primary,
                       fontWeight: FontWeight.bold,
                     ),
                   ),
@@ -414,20 +478,16 @@ class _OtpScreenState extends State<OtpScreen> {
               // ==================================================
               SizedBox(
                 width: double.infinity,
-
                 height: 55,
 
                 child: ElevatedButton(
                   onPressed: loading || resending ? null : verifyOtp,
 
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
+                    backgroundColor: AppColors.primary,
+                    foregroundColor: Colors.white,
 
-                    foregroundColor: Colors.deepPurple,
-
-                    disabledBackgroundColor: Colors.white.withValues(
-                      alpha: 0.6,
-                    ),
+                    disabledBackgroundColor: AppColors.primary.withValues(alpha: 0.6),
 
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
@@ -437,23 +497,18 @@ class _OtpScreenState extends State<OtpScreen> {
                   child: loading
                       ? const SizedBox(
                           width: 25,
-
                           height: 25,
 
                           child: CircularProgressIndicator(
                             strokeWidth: 3,
-
-                            color: Colors.deepPurple,
+                            color: Colors.white,
                           ),
                         )
                       : const Text(
                           'VERIFY OTP',
-
                           style: TextStyle(
-                            color: Colors.deepPurple,
-
+                            color: Colors.white,
                             fontSize: 18,
-
                             fontWeight: FontWeight.bold,
                           ),
                         ),
@@ -474,8 +529,7 @@ class _OtpScreenState extends State<OtpScreen> {
 
                 child: const Text(
                   'Change Phone Number',
-
-                  style: TextStyle(color: Colors.white),
+                  style: TextStyle(color: AppColors.primary),
                 ),
               ),
 
@@ -485,5 +539,174 @@ class _OtpScreenState extends State<OtpScreen> {
         ),
       ),
     );
+  }
+}
+
+class _DoorsteppLogoPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    const Color green = Color(0xFF168A43);
+
+    const Color darkGreen = Color(0xFF116A34);
+
+    final double scaleX = size.width / 150;
+
+    final double scaleY = size.height / 125;
+
+    canvas.save();
+
+    canvas.scale(scaleX, scaleY);
+
+    // ==========================================================
+    // SPEED LINES
+    // ==========================================================
+
+    final Paint greenPaint = Paint()
+      ..color = green
+      ..style = PaintingStyle.fill;
+
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        const Rect.fromLTWH(8, 55, 34, 7),
+        const Radius.circular(5),
+      ),
+      greenPaint,
+    );
+
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        const Rect.fromLTWH(2, 67, 40, 7),
+        const Radius.circular(5),
+      ),
+      greenPaint,
+    );
+
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        const Rect.fromLTWH(15, 79, 27, 7),
+        const Radius.circular(5),
+      ),
+      greenPaint,
+    );
+
+    // ==========================================================
+    // SPEED DOTS
+    // ==========================================================
+
+    canvas.drawCircle(const Offset(25, 43), 4, greenPaint);
+
+    canvas.drawCircle(const Offset(36, 34), 3, greenPaint);
+
+    // ==========================================================
+    // BAG BODY
+    // ==========================================================
+
+    final RRect bag = RRect.fromRectAndRadius(
+      const Rect.fromLTWH(40, 43, 82, 66),
+      const Radius.circular(10),
+    );
+
+    canvas.drawRRect(bag, greenPaint);
+
+    // ==========================================================
+    // DARK TOP
+    // ==========================================================
+
+    final Paint darkFill = Paint()
+      ..color = darkGreen
+      ..style = PaintingStyle.fill;
+
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        const Rect.fromLTWH(47, 39, 68, 27),
+        const Radius.circular(8),
+      ),
+      darkFill,
+    );
+
+    // ==========================================================
+    // HANDLE
+    // ==========================================================
+
+    final Paint handlePaint = Paint()
+      ..color = darkGreen
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 5
+      ..strokeCap = StrokeCap.round;
+
+    final Path handle = Path();
+
+    handle.moveTo(67, 45);
+
+    handle.cubicTo(67, 23, 99, 23, 99, 45);
+
+    canvas.drawPath(handle, handlePaint);
+
+    // ==========================================================
+    // WHITE D
+    // ==========================================================
+
+    final Paint whitePaint = Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 6
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    final Path dPath = Path();
+
+    dPath.moveTo(63, 59);
+
+    dPath.lineTo(63, 94);
+
+    dPath.moveTo(63, 60);
+
+    dPath.lineTo(76, 60);
+
+    dPath.cubicTo(95, 60, 95, 94, 76, 94);
+
+    dPath.lineTo(63, 94);
+
+    canvas.drawPath(dPath, whitePaint);
+
+    // ==========================================================
+    // WHEELS
+    // ==========================================================
+
+    final Paint wheelPaint = Paint()
+      ..color = darkGreen
+      ..style = PaintingStyle.fill;
+
+    canvas.drawCircle(const Offset(59, 113), 7, wheelPaint);
+
+    canvas.drawCircle(const Offset(106, 113), 7, wheelPaint);
+
+    final Paint wheelCenter = Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.fill;
+
+    canvas.drawCircle(const Offset(59, 113), 3, wheelCenter);
+
+    canvas.drawCircle(const Offset(106, 113), 3, wheelCenter);
+
+    // ==========================================================
+    // SHADOW
+    // ==========================================================
+
+    final Paint shadowPaint = Paint()
+      ..color = const Color(0xffDDEDE4)
+      ..style = PaintingStyle.fill;
+
+    canvas.drawOval(
+      Rect.fromCenter(center: const Offset(82, 125), width: 90, height: 8),
+      shadowPaint,
+    );
+
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) {
+    return false;
   }
 }

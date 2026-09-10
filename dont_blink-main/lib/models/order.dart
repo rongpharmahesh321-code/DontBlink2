@@ -8,6 +8,7 @@ class OrderModel {
 
   final double subtotal;
   final double deliveryFee;
+  final double handlingFee;
   final double platformFee;
   final double grandTotal;
 
@@ -16,11 +17,13 @@ class OrderModel {
   final DateTime? createdAt;
 
   // ==========================================
-  // CUSTOMER LOCATION
+  // CUSTOMER LOCATION & RATING
   // ==========================================
 
   final double? customerLatitude;
   final double? customerLongitude;
+  final int? rating;
+  final String? ratingFeedback;
 
   OrderModel({
     required this.id,
@@ -30,12 +33,15 @@ class OrderModel {
     required this.status,
     required this.subtotal,
     required this.deliveryFee,
+    this.handlingFee = 0.0,
     required this.platformFee,
     required this.grandTotal,
     required this.items,
     this.createdAt,
     this.customerLatitude,
     this.customerLongitude,
+    this.rating,
+    this.ratingFeedback,
   });
 
   // ==========================================
@@ -58,13 +64,15 @@ class OrderModel {
 
       deliveryFee: (data["deliveryFee"] ?? 0).toDouble(),
 
+      handlingFee: (data["handlingFee"] ?? 0).toDouble(),
+
       platformFee: (data["platformFee"] ?? 0).toDouble(),
 
       grandTotal: (data["grandTotal"] ?? 0).toDouble(),
 
       items: List<Map<String, dynamic>>.from(data["items"] ?? []),
 
-      createdAt: data["createdAt"] != null ? data["createdAt"].toDate() : null,
+      createdAt: data["createdAt"]?.toDate(),
 
       // ========================================
       // CUSTOMER GPS
@@ -76,6 +84,10 @@ class OrderModel {
       customerLongitude: data["customerLongitude"] != null
           ? (data["customerLongitude"] as num).toDouble()
           : null,
+
+      rating: data["rating"] != null ? (data["rating"] as num).toInt() : null,
+
+      ratingFeedback: data["ratingFeedback"] as String?,
     );
   }
 
@@ -97,6 +109,8 @@ class OrderModel {
 
       "deliveryFee": deliveryFee,
 
+      "handlingFee": handlingFee,
+
       "platformFee": platformFee,
 
       "grandTotal": grandTotal,
@@ -111,6 +125,10 @@ class OrderModel {
       "customerLatitude": customerLatitude,
 
       "customerLongitude": customerLongitude,
+
+      "rating": rating,
+
+      "ratingFeedback": ratingFeedback,
     };
   }
 }

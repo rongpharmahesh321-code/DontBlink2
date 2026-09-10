@@ -31,8 +31,8 @@ class CartProvider extends ChangeNotifier {
   // ADD
   // ==========================================================
 
-  void add(Product product) {
-    Cart.add(product);
+  bool add(Product product) {
+    return Cart.add(product);
   }
 
   // ==========================================================

@@ -7,6 +7,90 @@
   "client": [
     {
       "client_info": {
+        "mobilesdk_app_id": "1:522053783800:android:34c292604c09ea77406b0d",
+        "android_client_info": {
+          "package_name": "com.doorstepp.app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "522053783800-7rqj2jj560bs21up17fv90v8ks0idbu0.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.doorstepp.app",
+            "certificate_hash": "395291ad5ccefa888c38d1b95d82fe8a732583fc"
+          }
+        },
+        {
+          "client_id": "522053783800-fup2ntunmo1ass6bru64ucc3200sqqse.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.doorstepp.app",
+            "certificate_hash": "edac2d73830f8aace88be2053e4688bcb6aeb6e1"
+          }
+        },
+        {
+          "client_id": "522053783800-glcdrvb37h9h7nqrts4nomke9n3ma6u5.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.doorstepp.app",
+            "certificate_hash": "d2e5bc83143a4e467e23379b3c867c8010b4d7e1"
+          }
+        },
+        {
+          "client_id": "522053783800-j17h92iur7oo5oq4u6bbjgt8rom9dsro.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.doorstepp.app",
+            "certificate_hash": "5d53eb31945eedad0f1d0ceb132adc034efd6329"
+          }
+        },
+        {
+          "client_id": "522053783800-lssa0qj4d2cc90h33ce0ao0mt33hdehl.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.doorstepp.app",
+            "certificate_hash": "c30aa3fda174e03e8382f7bec4de251f9e269a4a"
+          }
+        },
+        {
+          "client_id": "522053783800-r4ihge36b4mghskmei6nekg03cfq4mj9.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.doorstepp.app",
+            "certificate_hash": "1ba9ae502548836c607d4856bcbece3642a84215"
+          }
+        },
+        {
+          "client_id": "522053783800-ciaa79ba792l26e2mgo6htda1jk263bf.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD-AXVBxb0Y7QMVHsGFqDGVOfU2Yq-kMXU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "522053783800-bu8s55cifjeiult2kgabr6mhjo62ma8m.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "522053783800-9i2aetpdldoo5g6cl4f5kjlllscuko1f.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.dontBlink"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
         "mobilesdk_app_id": "1:522053783800:android:dac012a39c0b42aa406b0d",
         "android_client_info": {
           "package_name": "com.example.dont_blink"

@@ -1,278 +1,320 @@
 import 'dart:convert';
 
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 
-// ==========================================
+// ==========================================================
 // WEATHER DATA
-// ==========================================
+// ==========================================================
 
 class WeatherData {
   final double temperature;
-  final int weatherCode;
+  final double feelsLikeTemperature;
+  final int humidity;
+  final bool isDaytime;
+  final String weatherType;
+  final String weatherDescription;
   final double precipitation;
+  final double rain;
+  final double showers;
   final double windSpeed;
+  final int precipitationProbability;
 
   WeatherData({
     required this.temperature,
-    required this.weatherCode,
+    this.feelsLikeTemperature = 0,
+    this.humidity = 0,
+    this.isDaytime = true,
+    required this.weatherType,
+    required this.weatherDescription,
     required this.precipitation,
+    required this.rain,
+    required this.showers,
     required this.windSpeed,
+    required this.precipitationProbability,
   });
 
-  // ==========================================
-  // WEATHER DESCRIPTION
-  // ==========================================
-
   String get description {
-    switch (weatherCode) {
-      case 0:
-        return "Clear Sky";
+    if (weatherDescription.trim().isNotEmpty) {
+      return weatherDescription.trim();
+    }
 
-      case 1:
-        return "Mainly Clear";
-
-      case 2:
-        return "Partly Cloudy";
-
-      case 3:
-        return "Overcast";
-
-      case 45:
-      case 48:
-        return "Foggy";
-
-      case 51:
-        return "Light Drizzle";
-
-      case 53:
-        return "Drizzle";
-
-      case 55:
-        return "Heavy Drizzle";
-
-      case 56:
-      case 57:
-        return "Freezing Drizzle";
-
-      case 61:
-        return "Light Rain";
-
-      case 63:
-        return "Moderate Rain";
-
-      case 65:
-        return "Heavy Rain";
-
-      case 66:
-      case 67:
-        return "Freezing Rain";
-
-      case 71:
-      case 73:
-      case 75:
-        return "Snow";
-
-      case 77:
-        return "Snow Grains";
-
-      case 80:
-        return "Light Rain Showers";
-
-      case 81:
-        return "Moderate Rain Showers";
-
-      case 82:
-        return "Heavy Rain Showers";
-
-      case 85:
-      case 86:
-        return "Snow Showers";
-
-      case 95:
-        return "Thunderstorm";
-
-      case 96:
-      case 99:
-        return "Thunderstorm with Hail";
-
+    final type = weatherType.toUpperCase();
+    switch (type) {
+      case 'CLEAR':
+        return isDaytime ? 'Sunny' : 'Clear';
+      case 'MOSTLY_CLEAR':
+        return isDaytime ? 'Mostly sunny' : 'Mostly clear';
+      case 'PARTLY_CLOUDY':
+        return 'Partly cloudy';
+      case 'MOSTLY_CLOUDY':
+        return 'Mostly cloudy';
+      case 'CLOUDY':
+      case 'OVERCAST':
+        return 'Cloudy';
+      case 'FOG':
+        return 'Foggy';
+      case 'HAZE':
+        return 'Hazy';
+      case 'MIST':
+        return 'Misty';
+      case 'WINDY':
+      case 'BREEZY':
+        return 'Windy';
+      case 'LIGHT_DRIZZLE':
+      case 'DRIZZLE':
+        return 'Light drizzle';
+      case 'HEAVY_DRIZZLE':
+        return 'Drizzle';
+      case 'LIGHT_RAIN':
+        return 'Light rain';
+      case 'RAIN':
+        return 'Rain';
+      case 'HEAVY_RAIN':
+        return 'Heavy rain';
+      case 'LIGHT_RAIN_SHOWERS':
+      case 'LIGHT_SHOWERS':
+        return 'Light rain showers';
+      case 'RAIN_SHOWERS':
+      case 'SHOWERS':
+        return 'Rain showers';
+      case 'HEAVY_RAIN_SHOWERS':
+      case 'HEAVY_SHOWERS':
+        return 'Heavy rain showers';
+      case 'THUNDERSTORM':
+      case 'HEAVY_THUNDERSTORM':
+      case 'THUNDERSHOWER':
+        return 'Thunderstorm';
+      case 'SNOW':
+      case 'LIGHT_SNOW':
+      case 'HEAVY_SNOW':
+      case 'SNOW_SHOWERS':
+        return 'Snow';
       default:
-        return "Unknown Weather";
+        return 'Clear';
     }
   }
-
-  // ==========================================
-  // WEATHER EMOJI
-  // ==========================================
 
   String get emoji {
-    switch (weatherCode) {
-      case 0:
-        return "☀️";
+    final type = weatherType.toUpperCase();
 
-      case 1:
-        return "🌤️";
-
-      case 2:
-      case 3:
-        return "⛅";
-
-      case 45:
-      case 48:
-        return "🌫️";
-
-      case 51:
-      case 53:
-      case 55:
-        return "🌦️";
-
-      case 56:
-      case 57:
-        return "🌧️";
-
-      case 61:
-        return "🌦️";
-
-      case 63:
-      case 65:
-      case 80:
-      case 81:
-      case 82:
-        return "🌧️";
-
-      case 66:
-      case 67:
-        return "🌧️";
-
-      case 71:
-      case 73:
-      case 75:
-      case 77:
-      case 85:
-      case 86:
-        return "❄️";
-
-      case 95:
-      case 96:
-      case 99:
-        return "⛈️";
-
-      default:
-        return "🌤️";
+    if (isThunderstorm) return '⛈️';
+    if (type.contains('HEAVY_RAIN') || type.contains('HEAVY_RAIN_SHOWERS')) {
+      return '🌧️';
     }
+    if (isRaining) {
+      return isDaytime ? '🌦️' : '🌧️';
+    }
+    if (type.contains('SNOW') ||
+        type.contains('ICE') ||
+        type.contains('FLURRIES')) {
+      return '❄️';
+    }
+    if (type.contains('FOG') ||
+        type.contains('HAZE') ||
+        type.contains('MIST') ||
+        type.contains('SMOKE') ||
+        type.contains('DUST')) {
+      return '🌫️';
+    }
+    if (type.contains('WIND')) return '💨';
+    if (type == 'CLOUDY' || type == 'OVERCAST' || type == 'MOSTLY_CLOUDY') {
+      return '☁️';
+    }
+    if (type.contains('CLOUD')) {
+      return isDaytime ? '⛅' : '☁️';
+    }
+    return isDaytime ? '☀️' : '🌙';
   }
-
-  // ==========================================
-  // LIGHT RAIN CHECK
-  // ==========================================
-
-  bool get isLightRain {
-    return weatherCode == 61;
-  }
-
-  // ==========================================
-  // RAIN CHECK
-  // ==========================================
 
   bool get isRaining {
-    return weatherCode == 51 ||
-        weatherCode == 53 ||
-        weatherCode == 55 ||
-        weatherCode == 61 ||
-        weatherCode == 63 ||
-        weatherCode == 65 ||
-        weatherCode == 80 ||
-        weatherCode == 81 ||
-        weatherCode == 82;
+    final type = weatherType.toUpperCase();
+
+    // Condition type explicitly specifies rain/drizzle/showers/storms
+    return type.contains('RAIN') ||
+        type.contains('DRIZZLE') ||
+        type.contains('SHOWER') ||
+        type.contains('THUNDERSTORM') ||
+        type.contains('THUNDERSHOWER');
   }
 
-  // ==========================================
-  // WEATHER DELIVERY SURCHARGE
-  // ==========================================
+  bool get isThunderstorm {
+    final type = weatherType.toUpperCase();
+
+    return type.contains('THUNDERSTORM') || type.contains('THUNDERSHOWER');
+  }
 
   double get deliverySurcharge {
-    if (isLightRain) {
-      return 10;
-    }
-
+    if (isThunderstorm) return 20;
+    if (isRaining) return 10;
     return 0;
   }
 
-  // ==========================================
-  // DELIVERY FEE
-  // ==========================================
-
   double get deliveryFee {
     const double normalDeliveryFee = 25;
-
     return normalDeliveryFee + deliverySurcharge;
   }
 
-  // ==========================================
-  // SURCHARGE DESCRIPTION
-  // ==========================================
-
   String get surchargeDescription {
-    if (isLightRain) {
-      return "Light rain delivery charge";
-    }
-
-    return "";
+    if (isThunderstorm) return 'Severe weather delivery charge';
+    if (isRaining) return 'Rain delivery charge';
+    return '';
   }
 }
 
-// ==========================================
+// ==========================================================
 // WEATHER SERVICE
-// ==========================================
+// ==========================================================
 
 class WeatherService {
-  // ==========================================
-  // STORE / DELIVERY AREA LOCATION
-  // ==========================================
+  static const MethodChannel _channel = MethodChannel(
+    'com.doorstepp.app/google_config',
+  );
 
-  static const double latitude = 25.8438;
-  static const double longitude = 93.4348;
+  static const String _defaultGoogleApiKey =
+      'AIzaSyAAfhEQXi71C2sEtiynHLm8PnJROwn_gz4';
 
-  // ==========================================
-  // GET CURRENT WEATHER
-  // ==========================================
+  Future<String> _getApiKey() async {
+    try {
+      final key = await _channel.invokeMethod<String>('getGoogleWebApiKey');
 
-  Future<WeatherData> getCurrentWeather() async {
-    final Uri url = Uri.parse(
-      'https://api.open-meteo.com/v1/forecast'
-      '?latitude=$latitude'
-      '&longitude=$longitude'
-      '&current=temperature_2m,weather_code,precipitation,wind_speed_10m'
-      '&timezone=auto',
-    );
+      if (key != null && key.trim().isNotEmpty) {
+        return key.trim();
+      }
+    } on PlatformException catch (_) {
+      // Platform channel unavailable; fall back to configured key
+    } catch (_) {}
 
-    final response = await http.get(
-      url,
-      headers: {'Accept': 'application/json'},
-    );
+    return _defaultGoogleApiKey;
+  }
+
+  Future<WeatherData> getCurrentWeather({
+    required double latitude,
+    required double longitude,
+  }) async {
+    final apiKey = await _getApiKey();
+
+    final Uri url =
+        Uri.https('weather.googleapis.com', '/v1/currentConditions:lookup', {
+          'key': apiKey,
+          'location.latitude': latitude.toString(),
+          'location.longitude': longitude.toString(),
+          'unitsSystem': 'METRIC',
+        });
+
+    final response = await http
+        .get(url, headers: const {'Accept': 'application/json'})
+        .timeout(const Duration(seconds: 12));
 
     if (response.statusCode != 200) {
+      String details = '';
+
+      try {
+        final errorData = jsonDecode(response.body);
+
+        if (errorData is Map<String, dynamic>) {
+          final error = errorData['error'];
+
+          if (error is Map<String, dynamic>) {
+            details = error['message']?.toString() ?? '';
+          }
+        }
+      } catch (_) {}
+
       throw Exception(
-        "Unable to load weather. "
-        "Error ${response.statusCode}",
+        details.isNotEmpty
+            ? 'Unable to load Google weather: $details'
+            : 'Unable to load Google weather. Error ${response.statusCode}.',
       );
     }
 
-    final Map<String, dynamic> data = jsonDecode(response.body);
+    final dynamic decoded = jsonDecode(response.body);
 
-    final current = data['current'];
+    if (decoded is! Map<String, dynamic>) {
+      throw Exception('Invalid weather information received.');
+    }
 
-    if (current == null) {
-      throw Exception("Weather information unavailable.");
+    final weatherCondition =
+        decoded['weatherCondition'] as Map<String, dynamic>?;
+
+    if (weatherCondition == null) {
+      throw Exception('Weather condition unavailable.');
+    }
+
+    final type = weatherCondition['type']?.toString().toUpperCase() ?? '';
+
+    String description = '';
+    final descriptionMap =
+        weatherCondition['description'] as Map<String, dynamic>?;
+
+    if (descriptionMap != null) {
+      description = descriptionMap['text']?.toString() ?? '';
+    }
+
+    double temperature = 0.0;
+    final temperatureMap = decoded['temperature'] as Map<String, dynamic>?;
+
+    if (temperatureMap != null) {
+      temperature = (temperatureMap['degrees'] as num?)?.toDouble() ?? 0.0;
+    }
+
+    double feelsLike = temperature;
+    final feelsLikeMap = (decoded['feelsLikeTemperature'] ??
+        decoded['heatIndex'] ??
+        decoded['windChill']) as Map<String, dynamic>?;
+
+    if (feelsLikeMap != null) {
+      feelsLike =
+          (feelsLikeMap['degrees'] as num?)?.toDouble() ?? temperature;
+    }
+
+    final int humidity = (decoded['relativeHumidity'] as num?)?.toInt() ?? 0;
+    final bool isDaytime = decoded['isDaytime'] as bool? ?? true;
+
+    int precipitationProbability = 0;
+    double precipitation = 0.0;
+
+    final precipitationMap =
+        decoded['precipitation'] as Map<String, dynamic>?;
+
+    if (precipitationMap != null) {
+      final probability = precipitationMap['probability'];
+
+      if (probability is Map<String, dynamic>) {
+        precipitationProbability =
+            (probability['percent'] as num?)?.toInt() ?? 0;
+      }
+
+      final qpf = precipitationMap['qpf'];
+
+      if (qpf is Map<String, dynamic>) {
+        precipitation = (qpf['quantity'] as num?)?.toDouble() ?? 0.0;
+      }
+    }
+
+    double windSpeed = 0.0;
+    final windMap = decoded['wind'] as Map<String, dynamic>?;
+
+    if (windMap != null) {
+      final speed = windMap['speed'];
+
+      if (speed is Map<String, dynamic>) {
+        windSpeed = (speed['value'] as num?)?.toDouble() ?? 0.0;
+      }
     }
 
     return WeatherData(
-      temperature: (current['temperature_2m'] as num).toDouble(),
-
-      weatherCode: (current['weather_code'] as num).toInt(),
-
-      precipitation: (current['precipitation'] as num).toDouble(),
-
-      windSpeed: (current['wind_speed_10m'] as num).toDouble(),
+      temperature: temperature,
+      feelsLikeTemperature: feelsLike,
+      humidity: humidity,
+      isDaytime: isDaytime,
+      weatherType: type,
+      weatherDescription: description,
+      precipitation: precipitation,
+      rain: 0,
+      showers: 0,
+      windSpeed: windSpeed,
+      precipitationProbability: precipitationProbability,
     );
   }
 }

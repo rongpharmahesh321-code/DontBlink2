@@ -1,566 +1,565 @@
-const {setGlobalOptions} = require("firebase-functions");
-const {onRequest} = require("firebase-functions/v2/https");
-const {defineSecret} = require("firebase-functions/params");
-const logger = require("firebase-functions/logger");
+const { onDocumentCreated } = require("firebase-functions/v2/firestore");
+const { initializeApp } = require("firebase-admin/app");
+const { getFirestore, FieldValue } = require("firebase-admin/firestore");
+const { getMessaging } = require("firebase-admin/messaging");
+
+initializeApp();
+
+const db = getFirestore();
+const messaging = getMessaging();
 
 // ============================================================
-// GLOBAL OPTIONS
+// SETTINGS
 // ============================================================
 
-setGlobalOptions({
-  maxInstances: 10,
-});
+// Maximum distance from the customer's delivery location
+// at which a rider can receive the delivery offer.
+const RIDER_RADIUS_KM = 10;
+
+// Rider location must have been updated within this period (30 minutes).
+const RIDER_LOCATION_MAX_AGE_MS = 30 * 60 * 1000;
 
 // ============================================================
-// CASHFREE SECRETS
+// HELPERS
 // ============================================================
 
-const cashfreeAppId = defineSecret("CASHFREE_APP_ID");
+function number(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
 
-const cashfreeSecretKey = defineSecret("CASHFREE_SECRET_KEY");
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function validCoordinates(latitude, longitude) {
+  return (
+    latitude !== null &&
+    longitude !== null &&
+    latitude >= -90 &&
+    latitude <= 90 &&
+    longitude >= -180 &&
+    longitude <= 180 &&
+    !(latitude === 0 && longitude === 0)
+  );
+}
+
+function distanceKm(lat1, lon1, lat2, lon2) {
+  const earthRadiusKm = 6371;
+
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+
+  const c =
+    2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return earthRadiusKm * c;
+}
+
+function timestampMillis(value) {
+  if (!value) return null;
+
+  if (typeof value.toMillis === "function") {
+    return value.toMillis();
+  }
+
+  if (value._seconds !== undefined) {
+    return value._seconds * 1000;
+  }
+
+  return null;
+}
+
+function getTokens(userData) {
+  const tokens = new Set();
+
+  // Single FCM token
+  const singleToken = userData.fcmToken;
+
+  if (
+    typeof singleToken === "string" &&
+    singleToken.trim()
+  ) {
+    tokens.add(singleToken.trim());
+  }
+
+  // Multiple FCM tokens
+  const tokenArray = userData.fcmTokens;
+
+  if (Array.isArray(tokenArray)) {
+    for (const token of tokenArray) {
+      if (
+        typeof token === "string" &&
+        token.trim()
+      ) {
+        tokens.add(token.trim());
+      }
+    }
+  }
+
+  return [...tokens];
+}
 
 // ============================================================
-// CASHFREE SANDBOX URL
+// FIND NEARBY RIDERS
 // ============================================================
 
-const CASHFREE_BASE_URL =
-  "https://sandbox.cashfree.com/pg";
+async function findNearbyRiders(
+  customerLatitude,
+  customerLongitude,
+  orderStoreId,
+) {
+  const snapshot = await db
+    .collection("users")
+    .where("role", "==", "rider")
+    .where("isAvailable", "==", true)
+    .get();
+
+  const riders = [];
+
+  const now = Date.now();
+
+  console.log(
+    `Checking ${snapshot.size} available riders for store ${orderStoreId}.`,
+  );
+
+  for (const doc of snapshot.docs) {
+    const data = doc.data();
+
+    // --------------------------------------------------------
+    // STORE MATCH
+    //
+    // If the rider has a specific store assigned, ensure it matches.
+    // If the rider has no storeId assigned (general/freelance rider),
+    // allow them to receive deliveries for any nearby store.
+    // --------------------------------------------------------
+
+    const riderStoreId = String(
+      data.storeId || data.storedId || "",
+    ).trim();
+
+    if (
+      orderStoreId &&
+      riderStoreId &&
+      riderStoreId !== orderStoreId
+    ) {
+      console.log(
+        `Rider ${doc.id} skipped: store mismatch. ` +
+        `riderStoreId=${riderStoreId}, ` +
+        `orderStoreId=${orderStoreId}`,
+      );
+
+      continue;
+    }
+
+    const isAssignedToThisStore =
+      Boolean(orderStoreId && riderStoreId && riderStoreId === orderStoreId);
+
+    const latitude = number(data.riderLatitude);
+    const longitude = number(data.riderLongitude);
+    const hasValidGps = validCoordinates(latitude, longitude);
+
+    const updatedAt = timestampMillis(data.riderLocationUpdatedAt);
+    const isGpsFresh =
+      updatedAt === null || now - updatedAt <= RIDER_LOCATION_MAX_AGE_MS;
+
+    // For unassigned/freelance riders, require valid and fresh GPS within radius
+    if (!isAssignedToThisStore) {
+      if (!hasValidGps) {
+        console.log(`Rider ${doc.id} skipped: invalid GPS for unassigned rider.`);
+        continue;
+      }
+
+      if (!isGpsFresh) {
+        console.log(
+          `Rider ${doc.id} skipped: GPS location is stale (> ${RIDER_LOCATION_MAX_AGE_MS / 60000} mins).`,
+        );
+        continue;
+      }
+
+      const distance = distanceKm(
+        customerLatitude,
+        customerLongitude,
+        latitude,
+        longitude,
+      );
+
+      if (distance > RIDER_RADIUS_KM) {
+        console.log(
+          `Rider ${doc.id} skipped: outside ${RIDER_RADIUS_KM} km radius (${distance.toFixed(2)} km).`,
+        );
+        continue;
+      }
+    }
+
+    const distance = hasValidGps
+      ? distanceKm(customerLatitude, customerLongitude, latitude, longitude)
+      : 0;
+
+    const tokens = getTokens(data);
+
+    console.log(
+      `Rider ${doc.id} is eligible. ` +
+      `store=${riderStoreId || "any"}, ` +
+      `assigned=${isAssignedToThisStore}, ` +
+      `distance=${distance.toFixed(3)} km, ` +
+      `tokens=${tokens.length}`,
+    );
+
+    riders.push({
+      uid: doc.id,
+      distanceKm: distance,
+      tokens,
+    });
+  }
+
+  // Closest riders first
+  riders.sort((a, b) => a.distanceKm - b.distanceKm);
+
+  return riders;
+}
 
 // ============================================================
-// CREATE CASHFREE ORDER
+// NOTIFY STORE MANAGERS
 // ============================================================
 
-exports.createCashfreeOrder = onRequest(
+async function notifyStoreManagers(
+  orderId,
+  order,
+  orderStoreId,
+  orderStoreName,
+  itemCount,
+) {
+  if (!orderStoreId) {
+    console.log(`No storeId on order ${orderId}; skipping store manager notifications.`);
+    return 0;
+  }
+
+  try {
+    const managersSnapshot = await db
+      .collection("users")
+      .where("storeId", "==", orderStoreId)
+      .get();
+
+    const managerTokens = new Set();
+    const managerUids = [];
+
+    for (const doc of managersSnapshot.docs) {
+      const data = doc.data();
+      const role = String(data.role || "").trim().toLowerCase();
+      if (role === "storemanager" || role === "store_manager") {
+        managerUids.push(doc.id);
+        const tokens = getTokens(data);
+        tokens.forEach((t) => managerTokens.add(t));
+      }
+    }
+
+    console.log(
+      `Order ${orderId}: Found ${managerUids.length} manager(s) for store ${orderStoreId} with ${managerTokens.size} token(s).`,
+    );
+
+    if (managerTokens.size > 0) {
+      const shortId = orderId.length > 8 ? orderId.substring(0, 8).toUpperCase() : orderId.toUpperCase();
+      const totalAmount = number(order.grandTotal) || 0;
+      const totalText = totalAmount > 0 ? ` • ₹${totalAmount.toFixed(0)}` : "";
+      const isRerouted = order.isRerouted === true;
+
+      const title = isRerouted
+        ? `⚡ Rerouted Order Received! (${orderStoreName})`
+        : `📦 New Order for ${orderStoreName}!`;
+
+      const body = `Order #${shortId} • ${itemCount} item${itemCount === 1 ? "" : "s"}${totalText}. Please pack for pickup.`;
+
+      const response = await messaging.sendEachForMulticast({
+        tokens: [...managerTokens],
+        notification: {
+          title,
+          body,
+        },
+        data: {
+          type: "store_order",
+          orderId: orderId,
+          storeId: orderStoreId,
+          storeName: orderStoreName,
+          status: String(order.status || "Placed"),
+          isRerouted: String(isRerouted),
+          clickAction: "OPEN_STORE_ORDERS",
+        },
+        android: {
+          priority: "high",
+          notification: {
+            channelId: "doorstepp_orders",
+            sound: "default",
+          },
+        },
+      });
+
+      console.log(
+        `Store manager notifications for order ${orderId}: ` +
+        `${response.successCount} sent, ${response.failureCount} failed.`,
+      );
+
+      return response.successCount;
+    }
+
+    return 0;
+  } catch (error) {
+    console.error(`Failed to notify store managers for order ${orderId}:`, error);
+    return 0;
+  }
+}
+
+// ============================================================
+// SEND DELIVERY OFFER & NOTIFICATIONS
+// ============================================================
+
+exports.offerNewDeliveryToNearbyRiders = onDocumentCreated(
   {
-    secrets: [
-      cashfreeAppId,
-      cashfreeSecretKey,
-    ],
-
-    cors: true,
-
-    region: "asia-south1",
-
-    timeoutSeconds: 60,
-
-    memory: "256MiB",
+    document: "orders/{orderId}",
+    region: "asia-south2",
   },
+  async (event) => {
+    const snapshot = event.data;
 
-  async (req, res) => {
-    // ========================================================
-    // CORS
-    // ========================================================
-
-    res.set("Access-Control-Allow-Origin", "*");
-
-    res.set(
-      "Access-Control-Allow-Headers",
-      "Content-Type, Authorization",
-    );
-
-    res.set(
-      "Access-Control-Allow-Methods",
-      "POST, OPTIONS",
-    );
-
-    // ========================================================
-    // PREFLIGHT
-    // ========================================================
-
-    if (req.method === "OPTIONS") {
-      return res.status(204).send("");
+    if (!snapshot) {
+      console.log("No order snapshot.");
+      return;
     }
 
-    // ========================================================
-    // ONLY POST
-    // ========================================================
+    const orderId = event.params.orderId;
+    const order = snapshot.data();
 
-    if (req.method !== "POST") {
-      return res.status(405).json({
-        success: false,
-        error: "Method not allowed",
-      });
+    console.log(`Processing new order ${orderId}.`);
+
+    // --------------------------------------------------------
+    // ONLY NEWLY PLACED ORDERS
+    // --------------------------------------------------------
+
+    const status = String(order.status || "").trim().toLowerCase();
+
+    if (status !== "placed") {
+      console.log(`Order ${orderId} ignored because status is "${status}".`);
+      return;
     }
 
-    try {
-      // ======================================================
-      // READ REQUEST BODY
-      // ======================================================
+    // --------------------------------------------------------
+    // NEVER OFFER AN ALREADY ASSIGNED ORDER
+    // --------------------------------------------------------
 
-      const {
+    const existingRiderId = String(order.riderId || "").trim();
+
+    if (existingRiderId) {
+      console.log(`Order ${orderId} already has rider ${existingRiderId}.`);
+      return;
+    }
+
+    // --------------------------------------------------------
+    // ORDER STORE & ITEM DETAILS
+    // --------------------------------------------------------
+
+    const orderStoreId = String(order.storeId || "").trim();
+    const orderStoreCode = String(order.storeCode || "").trim();
+    const orderStoreName =
+      String(order.storeName || "").trim() || "Nearby store";
+
+    const itemCount = Array.isArray(order.items)
+      ? order.items.reduce(
+          (total, item) => total + (number(item?.quantity) || 1),
+          0,
+        )
+      : 0;
+
+    // --------------------------------------------------------
+    // STEP 1: NOTIFY STORE MANAGERS (ALWAYS)
+    // --------------------------------------------------------
+
+    let storeManagerNotifiedCount = 0;
+    if (orderStoreId) {
+      storeManagerNotifiedCount = await notifyStoreManagers(
         orderId,
-        amount,
-        customerId,
-        customerName,
-        customerPhone,
-        customerEmail,
-        returnUrl,
-      } = req.body || {};
-
-      // ======================================================
-      // VALIDATION
-      // ======================================================
-
-      if (!orderId) {
-        return res.status(400).json({
-          success: false,
-          error: "Missing orderId",
-        });
-      }
-
-      if (amount === undefined || amount === null) {
-        return res.status(400).json({
-          success: false,
-          error: "Missing amount",
-        });
-      }
-
-      const orderAmount = Number(amount);
-
-      if (!Number.isFinite(orderAmount) || orderAmount <= 0) {
-        return res.status(400).json({
-          success: false,
-          error: "Invalid order amount",
-        });
-      }
-
-      if (!customerId) {
-        return res.status(400).json({
-          success: false,
-          error: "Missing customerId",
-        });
-      }
-
-      if (!customerPhone) {
-        return res.status(400).json({
-          success: false,
-          error: "Missing customerPhone",
-        });
-      }
-
-      // ======================================================
-      // CASHFREE CREDENTIALS
-      // ======================================================
-
-      const appId = cashfreeAppId.value();
-
-      const secretKey = cashfreeSecretKey.value();
-
-      if (!appId || !secretKey) {
-        logger.error(
-          "Cashfree credentials are not available.",
-        );
-
-        return res.status(500).json({
-          success: false,
-          error: "Cashfree configuration is missing",
-        });
-      }
-
-      // ======================================================
-      // CASHFREE REQUEST
-      // ======================================================
-
-      const cashfreePayload = {
-        order_id: orderId,
-
-        order_amount: Number(orderAmount.toFixed(2)),
-
-        order_currency: "INR",
-
-        customer_details: {
-          customer_id: String(customerId),
-
-          customer_name:
-            customerName || "Customer",
-
-          customer_email:
-            customerEmail || "customer@example.com",
-
-          customer_phone:
-            String(customerPhone),
-        },
-
-        order_meta: {
-          return_url:
-            returnUrl ||
-            "https://example.com/payment-success",
-        },
-
-        order_note: "Don'tBlink Order",
-      };
-
-      // ======================================================
-      // CALL CASHFREE
-      // ======================================================
-
-      const response = await fetch(
-        `${CASHFREE_BASE_URL}/orders`,
-        {
-          method: "POST",
-
-          headers: {
-            "Content-Type": "application/json",
-
-            "x-api-version": "2025-01-01",
-
-            "x-client-id": appId,
-
-            "x-client-secret": secretKey,
-
-            "x-request-id":
-              `${orderId}-${Date.now()}`,
-          },
-
-          body: JSON.stringify(
-            cashfreePayload,
-          ),
-        },
+        order,
+        orderStoreId,
+        orderStoreName,
+        itemCount,
       );
+    }
 
-      // ======================================================
-      // CASHFREE RESPONSE
-      // ======================================================
+    // --------------------------------------------------------
+    // STEP 2: CUSTOMER COORDINATES & VALIDATION FOR RIDERS
+    // --------------------------------------------------------
 
-      const responseText =
-        await response.text();
+    const customerLatitude = number(order.customerLatitude);
+    const customerLongitude = number(order.customerLongitude);
 
-      let data;
+    if (!validCoordinates(customerLatitude, customerLongitude)) {
+      console.log(`Order ${orderId} has invalid customer coordinates.`);
+      await snapshot.ref.set(
+        {
+          storeManagerNotifiedCount,
+          riderOfferStatus: "invalid_coordinates",
+          riderOfferUpdatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+      return;
+    }
 
+    if (!orderStoreId) {
+      console.log(`Order ${orderId} has no storeId. Cannot safely offer this delivery.`);
+      await snapshot.ref.set(
+        {
+          storeManagerNotifiedCount,
+          offeredRiderIds: [],
+          riderOfferStatus: "missing_store_id",
+          riderOfferRadiusKm: RIDER_RADIUS_KM,
+          riderOfferUpdatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+      return;
+    }
+
+    console.log(
+      `Order ${orderId} store: ${orderStoreName} ` +
+      `(storeId=${orderStoreId}, storeCode=${orderStoreCode})`,
+    );
+
+    // --------------------------------------------------------
+    // STEP 3: FIND NEARBY RIDERS FOR THIS STORE
+    // --------------------------------------------------------
+
+    const nearbyRiders = await findNearbyRiders(
+      customerLatitude,
+      customerLongitude,
+      orderStoreId,
+    );
+
+    if (nearbyRiders.length === 0) {
+      console.log(`No eligible nearby riders found for order ${orderId}.`);
+      await snapshot.ref.set(
+        {
+          storeManagerNotifiedCount,
+          offeredRiderIds: [],
+          riderOfferStatus: "no_nearby_riders",
+          riderOfferRadiusKm: RIDER_RADIUS_KM,
+          riderOfferUpdatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+      return;
+    }
+
+    // --------------------------------------------------------
+    // UNIQUE RIDER IDS & FCM TOKENS
+    // --------------------------------------------------------
+
+    const offeredRiderIds = [...new Set(nearbyRiders.map((r) => r.uid))];
+    const allTokens = [...new Set(nearbyRiders.flatMap((r) => r.tokens))];
+
+    await snapshot.ref.set(
+      {
+        storeManagerNotifiedCount,
+        offeredRiderIds,
+        riderOfferStatus: "offered",
+        riderOfferRadiusKm: RIDER_RADIUS_KM,
+        riderOfferUpdatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+
+    console.log(
+      `Order ${orderId} assigned to ${offeredRiderIds.length} eligible riders.`,
+    );
+
+    // --------------------------------------------------------
+    // STEP 4: SEND RIDER FCM NOTIFICATIONS
+    // --------------------------------------------------------
+
+    const customerAddress =
+      String(order.address || "").trim() || "Customer location";
+    const isRerouted = order.isRerouted === true;
+
+    const notificationTitle = isRerouted
+      ? "⚡ Rerouted Pickup Available"
+      : "🚴 Delivery Available";
+
+    const notificationBody =
+      itemCount > 0
+        ? `${itemCount} item${itemCount === 1 ? "" : "s"} • ${orderStoreName} • ${customerAddress}`
+        : `New delivery from ${orderStoreName} near you`;
+
+    if (allTokens.length > 0) {
       try {
-        data = JSON.parse(responseText);
+        const response = await messaging.sendEachForMulticast({
+          tokens: allTokens,
+          notification: {
+            title: notificationTitle,
+            body: notificationBody,
+          },
+          data: {
+            type: "delivery_offer",
+            orderId: orderId,
+            storeId: orderStoreId,
+            storeName: orderStoreName,
+            isRerouted: String(isRerouted),
+            customerAddress: customerAddress,
+            clickAction: "OPEN_DELIVERY",
+          },
+          android: {
+            priority: "high",
+            notification: {
+              channelId: "delivery_offers",
+              sound: "default",
+            },
+          },
+        });
+
+        console.log(
+          `Order ${orderId}: sent ${response.successCount} rider notifications, ` +
+          `${response.failureCount} failures.`,
+        );
+
+        if (response.failureCount > 0) {
+          response.responses.forEach((result, index) => {
+            if (!result.success) {
+              console.log(
+                `FCM token ${index} failed:`,
+                result.error?.message || "Unknown FCM error",
+              );
+            }
+          });
+        }
       } catch (error) {
-        data = {
-          raw: responseText,
-        };
+        console.error(`FCM notification failed for order ${orderId}:`, error);
       }
-
-      // ======================================================
-      // CASHFREE ERROR
-      // ======================================================
-
-      if (!response.ok) {
-        logger.error(
-          "Cashfree Create Order failed",
-          {
-            status: response.status,
-            response: data,
-          },
-        );
-
-        return res.status(502).json({
-          success: false,
-
-          error:
-            data?.message ||
-            data?.error_description ||
-            "Cashfree order creation failed",
-
-          cashfreeStatus:
-            response.status,
-        });
-      }
-
-      // ======================================================
-      // SUCCESS
-      // ======================================================
-
-      logger.info(
-        "Cashfree order created",
-        {
-          orderId,
-        },
-      );
-
-      return res.status(200).json({
-        success: true,
-
-        orderId:
-          data.order_id || orderId,
-
-        paymentSessionId:
-          data.payment_session_id,
-
-        cfOrderId:
-          data.cf_order_id || null,
-
-        orderStatus:
-          data.order_status || null,
-      });
-    } catch (error) {
-      // ======================================================
-      // SERVER ERROR
-      // ======================================================
-
-      logger.error(
-        "createCashfreeOrder error",
-        error,
-      );
-
-      return res.status(500).json({
-        success: false,
-
-        error:
-          error?.message ||
-          "Internal server error",
-      });
+    } else {
+      console.log(`Order ${orderId}: no FCM tokens available for riders.`);
     }
-  },
-);
-// ============================================================
-// VERIFY CASHFREE PAYMENT
-// ============================================================
 
-exports.verifyCashfreePayment = onRequest(
-  {
-    secrets: [
-      cashfreeAppId,
-      cashfreeSecretKey,
-    ],
+    // --------------------------------------------------------
+    // STEP 5: SAVE RIDER DISTANCES
+    // --------------------------------------------------------
 
-    cors: true,
-
-    region: "asia-south1",
-
-    timeoutSeconds: 60,
-
-    memory: "256MiB",
-  },
-
-  async (req, res) => {
-    // ========================================================
-    // CORS
-    // ========================================================
-
-    res.set(
-      "Access-Control-Allow-Origin",
-      "*",
+    await snapshot.ref.set(
+      {
+        riderOfferCount: offeredRiderIds.length,
+        nearbyRiderDistancesKm: nearbyRiders.map((rider) => ({
+          riderId: rider.uid,
+          distanceKm: Number(rider.distanceKm.toFixed(3)),
+        })),
+      },
+      { merge: true },
     );
 
-    res.set(
-      "Access-Control-Allow-Headers",
-      "Content-Type, Authorization",
+    console.log(
+      `Order ${orderId} successfully processed for store managers & riders.`,
     );
-
-    res.set(
-      "Access-Control-Allow-Methods",
-      "POST, OPTIONS",
-    );
-
-    // ========================================================
-    // PREFLIGHT
-    // ========================================================
-
-    if (req.method === "OPTIONS") {
-      return res.status(204).send("");
-    }
-
-    // ========================================================
-    // ONLY POST
-    // ========================================================
-
-    if (req.method !== "POST") {
-      return res.status(405).json({
-        success: false,
-        error: "Method not allowed",
-      });
-    }
-
-    try {
-      // ======================================================
-      // READ REQUEST
-      // ======================================================
-
-      const {
-        orderId,
-      } = req.body || {};
-
-      // ======================================================
-      // VALIDATE ORDER ID
-      // ======================================================
-
-      if (!orderId) {
-        return res.status(400).json({
-          success: false,
-          error: "Missing orderId",
-        });
-      }
-
-      // ======================================================
-      // CASHFREE CREDENTIALS
-      // ======================================================
-
-      const appId =
-        cashfreeAppId.value();
-
-      const secretKey =
-        cashfreeSecretKey.value();
-
-      if (!appId || !secretKey) {
-        logger.error(
-          "Cashfree credentials are missing.",
-        );
-
-        return res.status(500).json({
-          success: false,
-          error:
-            "Cashfree configuration is missing",
-        });
-      }
-
-      // ======================================================
-      // GET PAYMENTS FOR ORDER
-      // ======================================================
-
-      const response = await fetch(
-        `${CASHFREE_BASE_URL}/orders/${encodeURIComponent(orderId)}/payments`,
-        {
-          method: "GET",
-
-          headers: {
-            Accept:
-              "application/json",
-
-            "x-api-version":
-              "2025-01-01",
-
-            "x-client-id":
-              appId,
-
-            "x-client-secret":
-              secretKey,
-          },
-        },
-      );
-
-      // ======================================================
-      // READ RESPONSE
-      // ======================================================
-
-      const responseText =
-        await response.text();
-
-      let payments;
-
-      try {
-        payments =
-          JSON.parse(responseText);
-      } catch (error) {
-        payments = [];
-      }
-
-      // ======================================================
-      // CASHFREE ERROR
-      // ======================================================
-
-      if (!response.ok) {
-        logger.error(
-          "Cashfree payment verification failed",
-          {
-            orderId,
-            status: response.status,
-            response: payments,
-          },
-        );
-
-        return res.status(502).json({
-          success: false,
-
-          error:
-            payments?.message ||
-            payments?.error_description ||
-            "Unable to verify payment",
-
-          cashfreeStatus:
-            response.status,
-        });
-      }
-
-      // ======================================================
-      // NORMALIZE PAYMENT LIST
-      // ======================================================
-
-      const paymentList =
-        Array.isArray(payments)
-          ? payments
-          : [];
-
-      // ======================================================
-      // FIND SUCCESS PAYMENT
-      // ======================================================
-
-      const successfulPayment =
-        paymentList.find(
-          (payment) =>
-            payment?.payment_status ===
-            "SUCCESS",
-        );
-
-      // ======================================================
-      // FIND PENDING PAYMENT
-      // ======================================================
-
-      const pendingPayment =
-        paymentList.find(
-          (payment) =>
-            payment?.payment_status ===
-            "PENDING",
-        );
-
-      // ======================================================
-      // DETERMINE FINAL STATUS
-      // ======================================================
-
-      let status = "FAILED";
-
-      if (successfulPayment) {
-        status = "SUCCESS";
-      } else if (pendingPayment) {
-        status = "PENDING";
-      }
-
-      // ======================================================
-      // RETURN RESULT
-      // ======================================================
-
-      logger.info(
-        "Cashfree payment verification completed",
-        {
-          orderId,
-          status,
-        },
-      );
-
-      return res.status(200).json({
-        success: true,
-
-        orderId,
-
-        paymentStatus: status,
-
-        payment:
-          successfulPayment ||
-          pendingPayment ||
-          paymentList[0] ||
-          null,
-      });
-    } catch (error) {
-      // ======================================================
-      // SERVER ERROR
-      // ======================================================
-
-      logger.error(
-        "verifyCashfreePayment error",
-        error,
-      );
-
-      return res.status(500).json({
-        success: false,
-
-        error:
-          error?.message ||
-          "Internal server error",
-      });
-    }
   },
 );

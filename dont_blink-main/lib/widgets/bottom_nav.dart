@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../theme/app_colors.dart';
 
 class BottomNav extends StatelessWidget {
   const BottomNav({super.key});
@@ -7,7 +8,7 @@ class BottomNav extends StatelessWidget {
   Widget build(BuildContext context) {
     return BottomNavigationBar(
       currentIndex: 0,
-      selectedItemColor: Colors.green,
+      selectedItemColor: AppColors.primary,
       unselectedItemColor: Colors.grey,
       type: BottomNavigationBarType.fixed,
       items: const [

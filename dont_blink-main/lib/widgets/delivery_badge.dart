@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../theme/app_colors.dart';
 
 class DeliveryBadge extends StatelessWidget {
   final int minutes;
@@ -10,18 +11,18 @@ class DeliveryBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        color: Colors.green.shade100,
+        color: AppColors.tintGreen,
         borderRadius: BorderRadius.circular(20),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.flash_on, color: Colors.green, size: 18),
+          const Icon(Icons.flash_on, color: AppColors.primary, size: 18),
           const SizedBox(width: 4),
           Text(
             "$minutes mins",
             style: const TextStyle(
-              color: Colors.green,
+              color: AppColors.primary,
               fontWeight: FontWeight.bold,
             ),
           ),

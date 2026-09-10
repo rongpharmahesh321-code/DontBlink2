@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
+import '../theme/app_colors.dart';
 
 class PaymentCard extends StatelessWidget {
   final String title;
   final String subtitle;
   final IconData icon;
   final bool selected;
+  final bool enabled;
   final VoidCallback onTap;
 
   const PaymentCard({
@@ -13,21 +15,27 @@ class PaymentCard extends StatelessWidget {
     required this.subtitle,
     required this.icon,
     required this.selected,
+    this.enabled = true,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
+    final effectiveColor = enabled ? AppColors.primary : Colors.grey.shade400;
+
     return InkWell(
       borderRadius: BorderRadius.circular(18),
-      onTap: onTap,
+      onTap: enabled ? onTap : null,
       child: Card(
-        elevation: selected ? 3 : 1,
+        elevation: enabled && selected ? 3 : 1,
+        color: enabled ? Colors.white : const Color(0xFFF9FAF9),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(18),
           side: BorderSide(
-            color: selected ? Colors.green : Colors.grey.shade300,
-            width: selected ? 2 : 1,
+            color: enabled
+                ? (selected ? AppColors.primary : AppColors.border)
+                : Colors.grey.shade200,
+            width: selected && enabled ? 2 : 1,
           ),
         ),
         child: Padding(
@@ -35,8 +43,9 @@ class PaymentCard extends StatelessWidget {
           child: Row(
             children: [
               CircleAvatar(
-                backgroundColor: Colors.green.shade100,
-                child: Icon(icon, color: Colors.green),
+                backgroundColor:
+                    enabled ? AppColors.tintGreen : Colors.grey.shade200,
+                child: Icon(icon, color: effectiveColor),
               ),
 
               const SizedBox(width: 16),
@@ -45,24 +54,66 @@ class PaymentCard extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      title,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 17,
-                      ),
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            title,
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 17,
+                              color: enabled
+                                  ? Colors.black87
+                                  : Colors.grey.shade600,
+                            ),
+                          ),
+                        ),
+                        if (!enabled) ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 7,
+                              vertical: 2,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.amber.shade100,
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text(
+                              'Unavailable',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.amber.shade900,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
 
                     const SizedBox(height: 3),
 
-                    Text(subtitle, style: const TextStyle(color: Colors.grey)),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                        color: enabled ? Colors.grey : Colors.grey.shade500,
+                        fontSize: 13,
+                      ),
+                    ),
                   ],
                 ),
               ),
 
               Icon(
-                selected ? Icons.radio_button_checked : Icons.radio_button_off,
-                color: Colors.green,
+                enabled
+                    ? (selected
+                        ? Icons.radio_button_checked
+                        : Icons.radio_button_off)
+                    : Icons.block,
+                color: enabled
+                    ? (selected ? AppColors.primary : Colors.grey.shade400)
+                    : Colors.grey.shade400,
               ),
             ],
           ),

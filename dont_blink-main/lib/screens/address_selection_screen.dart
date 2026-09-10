@@ -1,20 +1,15 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
-import 'package:flutter_map/flutter_map.dart';
-import 'package:latlong2/latlong.dart';
 
 import '../services/address_service.dart';
 
 class AddressSelectionScreen extends StatefulWidget {
-  // ==========================================================
-  // CALLBACK
-  //
-  // AuthGate uses this to know that an address has been saved.
-  // ==========================================================
-
   final VoidCallback? onAddressSaved;
 
   const AddressSelectionScreen({super.key, this.onAddressSaved});
@@ -31,10 +26,20 @@ class _AddressSelectionScreenState extends State<AddressSelectionScreen> {
   final AddressService addressService = AddressService();
 
   // ==========================================================
+  // GOOGLE CONFIG CHANNEL
+  // ==========================================================
+
+  static const MethodChannel _googleConfigChannel = MethodChannel(
+    'com.doorstepp.app/google_config',
+  );
+
+  // ==========================================================
   // MAP
   // ==========================================================
 
-  final MapController _mapController = MapController();
+  GoogleMapController? _mapController;
+
+  static const LatLng _defaultLocation = LatLng(25.8438, 93.4348);
 
   LatLng? _selectedLocation;
 
@@ -61,7 +66,7 @@ class _AddressSelectionScreenState extends State<AddressSelectionScreen> {
   // COLORS
   // ==========================================================
 
-  static const Color green = Colors.green;
+  static const Color green = Color(0xFF168A43);
 
   // ==========================================================
   // DISPOSE
@@ -71,6 +76,60 @@ class _AddressSelectionScreenState extends State<AddressSelectionScreen> {
   void dispose() {
     _searchController.dispose();
     super.dispose();
+  }
+
+  // ==========================================================
+  // GOOGLE WEB API KEY
+  // ==========================================================
+
+  Future<String> _getGoogleWebApiKey() async {
+    try {
+      final key = await _googleConfigChannel.invokeMethod<String>(
+        'getGoogleWebApiKey',
+      );
+
+      if (key == null || key.trim().isEmpty) {
+        throw Exception('Google Web API key is not configured.');
+      }
+
+      return key.trim();
+    } on PlatformException catch (e) {
+      debugPrint('Google API key error: ${e.message}');
+
+      throw Exception('Unable to load Google API configuration.');
+    } catch (e) {
+      rethrow;
+    }
+  }
+
+  // ==========================================================
+  // MAP CREATED
+  // ==========================================================
+
+  void _onMapCreated(GoogleMapController controller) {
+    _mapController = controller;
+  }
+
+  // ==========================================================
+  // MOVE MAP
+  // ==========================================================
+
+  Future<void> _moveTo(LatLng location, {double zoom = 17}) async {
+    final controller = _mapController;
+
+    if (controller == null) {
+      return;
+    }
+
+    try {
+      await controller.animateCamera(
+        CameraUpdate.newCameraPosition(
+          CameraPosition(target: location, zoom: zoom),
+        ),
+      );
+    } catch (e) {
+      debugPrint('Map camera error: $e');
+    }
   }
 
   // ==========================================================
@@ -123,18 +182,32 @@ class _AddressSelectionScreenState extends State<AddressSelectionScreen> {
       }
 
       // --------------------------------------------------------
-      // GET CURRENT LOCATION
+      // LAST KNOWN LOCATION FIRST
       // --------------------------------------------------------
 
-      final position = await Geolocator.getCurrentPosition(
+      Position? position;
+
+      try {
+        position = await Geolocator.getLastKnownPosition();
+      } catch (_) {
+        position = null;
+      }
+
+      // --------------------------------------------------------
+      // CURRENT LOCATION
+      // --------------------------------------------------------
+
+      position ??= await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.high,
         ),
-      );
+      ).timeout(const Duration(seconds: 12));
 
       final location = LatLng(position.latitude, position.longitude);
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
         _selectedLocation = location;
@@ -144,24 +217,28 @@ class _AddressSelectionScreenState extends State<AddressSelectionScreen> {
       // MOVE MAP
       // --------------------------------------------------------
 
-      _mapController.move(location, 17);
+      await _moveTo(location);
 
       // --------------------------------------------------------
-      // REVERSE GEOCODE
+      // GOOGLE REVERSE GEOCODING
       // --------------------------------------------------------
 
       await _reverseGeocode(location);
-    } catch (e) {
-      if (!mounted) return;
+    } on TimeoutException {
+      if (!mounted) {
+        return;
+      }
 
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          SnackBar(
-            content: Text(e.toString().replaceFirst('Exception: ', '')),
-            backgroundColor: Colors.red,
-          ),
-        );
+      _showMessage(
+        'Location is taking too long. Please try again.',
+        error: true,
+      );
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage(e.toString().replaceFirst('Exception: ', ''), error: true);
     } finally {
       if (mounted) {
         setState(() {
@@ -172,77 +249,104 @@ class _AddressSelectionScreenState extends State<AddressSelectionScreen> {
   }
 
   // ==========================================================
-  // REVERSE GEOCODING
+  // GOOGLE REVERSE GEOCODING
   // ==========================================================
 
   Future<void> _reverseGeocode(LatLng location) async {
     try {
-      final url = Uri.parse(
-        'https://nominatim.openstreetmap.org/reverse'
-        '?format=jsonv2'
-        '&lat=${location.latitude}'
-        '&lon=${location.longitude}'
-        '&zoom=18'
-        '&addressdetails=1',
-      );
+      final key = await _getGoogleWebApiKey();
 
-      final response = await http.get(
-        url,
-        headers: const {
-          'Accept': 'application/json',
-          'User-Agent': 'Doorstepp/1.0',
-        },
-      );
+      final url = Uri.https('maps.googleapis.com', '/maps/api/geocode/json', {
+        'latlng': '${location.latitude},${location.longitude}',
+        'language': 'en',
+        'key': key,
+      });
+
+      final response = await http
+          .get(url, headers: const {'Accept': 'application/json'})
+          .timeout(const Duration(seconds: 10));
 
       if (response.statusCode != 200) {
-        throw Exception('Unable to find address.');
+        throw Exception('Google address lookup failed.');
       }
 
-      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final data = jsonDecode(response.body);
 
-      final displayName = data['display_name']?.toString() ?? '';
+      if (data is! Map<String, dynamic>) {
+        throw Exception('Invalid Google address response.');
+      }
 
-      if (!mounted) return;
+      final status = data['status']?.toString();
+
+      if (status != 'OK') {
+        final errorMessage = data['error_message']?.toString();
+
+        throw Exception(
+          errorMessage?.isNotEmpty == true
+              ? errorMessage!
+              : 'Google address lookup failed: $status',
+        );
+      }
+
+      final results = data['results'];
+
+      if (results is! List || results.isEmpty) {
+        throw Exception('No address found for this location.');
+      }
+
+      final first = results.first;
+
+      if (first is! Map) {
+        throw Exception('Invalid address result.');
+      }
+
+      final formattedAddress =
+          first['formatted_address']?.toString().trim() ?? '';
+
+      if (formattedAddress.isEmpty) {
+        throw Exception('No valid address found.');
+      }
+
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
-        _selectedAddress = displayName.trim();
+        _selectedAddress = formattedAddress;
       });
     } catch (e) {
-      if (!mounted) return;
+      debugPrint('Google reverse geocoding error: $e');
+
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
         _selectedAddress = '';
       });
 
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Location found, but we could not get the address. '
-              'You can search for it manually.',
-            ),
-          ),
-        );
+      _showMessage(e.toString().replaceFirst('Exception: ', ''), error: true);
     }
   }
 
   // ==========================================================
-  // SEARCH ADDRESS
+  // GOOGLE ADDRESS SEARCH
   // ==========================================================
 
   Future<void> _searchAddress(String query) async {
     final text = query.trim();
 
     if (text.length < 3) {
-      setState(() {
-        _searchResults = [];
-      });
+      if (mounted) {
+        setState(() {
+          _searchResults = [];
+        });
+      }
 
       return;
     }
 
-    if (_searching) {
+    if (_searching || _saving) {
       return;
     }
 
@@ -251,68 +355,109 @@ class _AddressSelectionScreenState extends State<AddressSelectionScreen> {
     });
 
     try {
-      final encoded = Uri.encodeQueryComponent(text);
+      final key = await _getGoogleWebApiKey();
 
-      final url = Uri.parse(
-        'https://nominatim.openstreetmap.org/search'
-        '?format=jsonv2'
-        '&q=$encoded'
-        '&limit=5'
-        '&addressdetails=1',
-      );
+      final url = Uri.https('maps.googleapis.com', '/maps/api/geocode/json', {
+        'address': text,
+        'components': 'country:IN',
+        'language': 'en',
+        'region': 'in',
+        'key': key,
+      });
 
-      final response = await http.get(
-        url,
-        headers: const {
-          'Accept': 'application/json',
-          'User-Agent': 'Doorstepp/1.0',
-        },
-      );
+      final response = await http
+          .get(url, headers: const {'Accept': 'application/json'})
+          .timeout(const Duration(seconds: 10));
 
       if (response.statusCode != 200) {
-        throw Exception('Search failed.');
+        throw Exception('Google address search failed.');
       }
 
-      final List<dynamic> results = jsonDecode(response.body);
+      final data = jsonDecode(response.body);
+
+      if (data is! Map<String, dynamic>) {
+        throw Exception('Invalid Google search response.');
+      }
+
+      final status = data['status']?.toString();
+
+      if (status != 'OK' && status != 'ZERO_RESULTS') {
+        final errorMessage = data['error_message']?.toString();
+
+        throw Exception(
+          errorMessage?.isNotEmpty == true
+              ? errorMessage!
+              : 'Google address search failed: $status',
+        );
+      }
+
+      final rawResults = data['results'];
+
+      if (rawResults is! List) {
+        throw Exception('No search results available.');
+      }
 
       final List<_SearchResult> parsed = [];
 
-      for (final result in results) {
-        if (result is! Map<String, dynamic>) {
+      for (final result in rawResults) {
+        if (result is! Map) {
           continue;
         }
 
-        final lat = double.tryParse(result['lat']?.toString() ?? '');
+        final formattedAddress =
+            result['formatted_address']?.toString().trim() ?? '';
 
-        final lon = double.tryParse(result['lon']?.toString() ?? '');
+        final geometry = result['geometry'];
 
-        final displayName = result['display_name']?.toString() ?? '';
+        if (geometry is! Map) {
+          continue;
+        }
 
-        if (lat == null || lon == null || displayName.isEmpty) {
+        final location = geometry['location'];
+
+        if (location is! Map) {
+          continue;
+        }
+
+        final lat = (location['lat'] as num?)?.toDouble();
+
+        final lng = (location['lng'] as num?)?.toDouble();
+
+        if (lat == null || lng == null || formattedAddress.isEmpty) {
           continue;
         }
 
         parsed.add(
-          _SearchResult(location: LatLng(lat, lon), address: displayName),
+          _SearchResult(location: LatLng(lat, lng), address: formattedAddress),
         );
       }
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
-        _searchResults = parsed;
+        _searchResults = parsed.take(5).toList();
       });
-    } catch (e) {
-      if (!mounted) return;
 
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          const SnackBar(
-            content: Text('Unable to search for that address.'),
-            backgroundColor: Colors.red,
-          ),
-        );
+      if (parsed.isEmpty) {
+        _showMessage('No matching address was found.', error: true);
+      }
+    } on TimeoutException {
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage(
+        'Google address search timed out. Please try again.',
+        error: true,
+      );
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage(e.toString().replaceFirst('Exception: ', ''), error: true);
     } finally {
       if (mounted) {
         setState(() {
@@ -329,14 +474,43 @@ class _AddressSelectionScreenState extends State<AddressSelectionScreen> {
   Future<void> _selectSearchResult(_SearchResult result) async {
     FocusScope.of(context).unfocus();
 
+    if (_saving) {
+      return;
+    }
+
     setState(() {
       _selectedLocation = result.location;
+
       _selectedAddress = result.address;
+
       _searchResults = [];
+
       _searchController.text = result.address;
     });
 
-    _mapController.move(result.location, 17);
+    await _moveTo(result.location);
+  }
+
+  // ==========================================================
+  // MAP TAP
+  // ==========================================================
+
+  Future<void> _selectMapLocation(LatLng location) async {
+    if (_saving) {
+      return;
+    }
+
+    FocusScope.of(context).unfocus();
+
+    setState(() {
+      _selectedLocation = location;
+
+      _selectedAddress = '';
+
+      _searchResults = [];
+    });
+
+    await _reverseGeocode(location);
   }
 
   // ==========================================================
@@ -348,114 +522,56 @@ class _AddressSelectionScreenState extends State<AddressSelectionScreen> {
       return;
     }
 
-    // --------------------------------------------------------
-    // LOCATION CHECK
-    // --------------------------------------------------------
-
     final location = _selectedLocation;
 
     if (location == null) {
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          const SnackBar(
-            content: Text('Please select your delivery location first.'),
-            backgroundColor: Colors.orange,
-          ),
-        );
+      _showMessage('Please select your delivery location first.', error: true);
 
       return;
     }
-
-    // --------------------------------------------------------
-    // ADDRESS CHECK
-    // --------------------------------------------------------
 
     if (_selectedAddress.trim().isEmpty) {
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          const SnackBar(
-            content: Text('Please select a valid address.'),
-            backgroundColor: Colors.orange,
-          ),
-        );
+      _showMessage('Please select a valid address.', error: true);
 
       return;
     }
-
-    // --------------------------------------------------------
-    // START SAVING
-    // --------------------------------------------------------
 
     setState(() {
       _saving = true;
     });
 
     try {
-      // ------------------------------------------------------
-      // SAVE TO:
-      //
-      // users/{uid}/addresses/{addressId}
-      // ------------------------------------------------------
-
       await addressService.saveSelectedLocation(
         address: _selectedAddress.trim(),
         latitude: location.latitude,
         longitude: location.longitude,
       );
 
-      if (!mounted) return;
-
-      // ------------------------------------------------------
-      // TELL AUTHGATE
-      // ------------------------------------------------------
+      if (!mounted) {
+        return;
+      }
 
       widget.onAddressSaved?.call();
 
-      // ------------------------------------------------------
-      // SUCCESS MESSAGE
-      // ------------------------------------------------------
-
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          const SnackBar(
-            content: Text('Delivery address saved!'),
-            backgroundColor: Colors.green,
-          ),
-        );
-
-      // ------------------------------------------------------
-      // SMALL DELAY FOR SUCCESS FEEDBACK
-      // ------------------------------------------------------
+      _showMessage('Delivery address saved!', success: true);
 
       await Future.delayed(const Duration(milliseconds: 350));
 
-      if (!mounted) return;
-
-      // ------------------------------------------------------
-      // RETURN
-      //
-      // If opened from another screen, return there.
-      // AuthGate will already have switched to MainScreen.
-      // ------------------------------------------------------
+      if (!mounted) {
+        return;
+      }
 
       Navigator.pop(context, true);
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          SnackBar(
-            content: Text(
-              'Unable to save address: '
-              '${e.toString().replaceFirst('Exception: ', '')}',
-            ),
-            backgroundColor: Colors.red,
-          ),
-        );
+      _showMessage(
+        'Unable to save address: '
+        '${e.toString().replaceFirst('Exception: ', '')}',
+        error: true,
+      );
     } finally {
       if (mounted) {
         setState(() {
@@ -463,24 +579,6 @@ class _AddressSelectionScreenState extends State<AddressSelectionScreen> {
         });
       }
     }
-  }
-
-  // ==========================================================
-  // LOCATION MARKER
-  // ==========================================================
-
-  Widget _locationMarker() {
-    return Container(
-      width: 50,
-      height: 50,
-      decoration: BoxDecoration(
-        color: green,
-        shape: BoxShape.circle,
-        border: Border.all(color: Colors.white, width: 4),
-        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 10)],
-      ),
-      child: const Icon(Icons.location_on, color: Colors.white, size: 27),
-    );
   }
 
   // ==========================================================
@@ -495,6 +593,38 @@ class _AddressSelectionScreenState extends State<AddressSelectionScreen> {
         _selectSearchResult(result);
       },
     );
+  }
+
+  // ==========================================================
+  // MESSAGE
+  // ==========================================================
+
+  void _showMessage(
+    String message, {
+    bool error = false,
+    bool success = false,
+  }) {
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: error
+              ? Colors.red
+              : success
+              ? green
+              : Colors.orange,
+          behavior: SnackBarBehavior.floating,
+          margin: const EdgeInsets.all(14),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(13),
+          ),
+        ),
+      );
   }
 
   // ==========================================================
@@ -527,6 +657,7 @@ class _AddressSelectionScreenState extends State<AddressSelectionScreen> {
           // ====================================================
           // SEARCH
           // ====================================================
+
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
             child: TextField(
@@ -594,62 +725,43 @@ class _AddressSelectionScreenState extends State<AddressSelectionScreen> {
             ),
 
           // ====================================================
-          // MAP
+          // GOOGLE MAP
           // ====================================================
           Expanded(
             child: Stack(
               children: [
-                FlutterMap(
-                  mapController: _mapController,
-
-                  options: MapOptions(
-                    initialCenter: location ?? const LatLng(25.8438, 93.4348),
-                    initialZoom: location == null ? 13 : 17,
-
-                    interactionOptions: const InteractionOptions(
-                      flags: InteractiveFlag.all,
-                    ),
-
-                    onTap: (_, point) async {
-                      if (_saving) {
-                        return;
-                      }
-
-                      setState(() {
-                        _selectedLocation = point;
-                        _searchResults = [];
-                      });
-
-                      await _reverseGeocode(point);
-                    },
+                GoogleMap(
+                  initialCameraPosition: CameraPosition(
+                    target: location ?? _defaultLocation,
+                    zoom: location == null ? 13 : 17,
                   ),
-
-                  children: [
-                    // ------------------------------------------
-                    // MAP
-                    // ------------------------------------------
-                    TileLayer(
-                      urlTemplate:
-                          'https://tile.openstreetmap.org/'
-                          '{z}/{x}/{y}.png',
-                      userAgentPackageName: 'com.dontblink.app',
-                    ),
-
-                    // ------------------------------------------
-                    // MARKER
-                    // ------------------------------------------
+                  onMapCreated: _onMapCreated,
+                  myLocationEnabled: true,
+                  myLocationButtonEnabled: false,
+                  zoomControlsEnabled: false,
+                  mapToolbarEnabled: false,
+                  compassEnabled: true,
+                  rotateGesturesEnabled: true,
+                  scrollGesturesEnabled: true,
+                  tiltGesturesEnabled: true,
+                  zoomGesturesEnabled: true,
+                  onTap: _selectMapLocation,
+                  markers: {
                     if (location != null)
-                      MarkerLayer(
-                        markers: [
-                          Marker(
-                            point: location,
-                            width: 60,
-                            height: 60,
-                            child: _locationMarker(),
-                          ),
-                        ],
+                      Marker(
+                        markerId: const MarkerId('selected_delivery_location'),
+                        position: location,
+                        icon: BitmapDescriptor.defaultMarkerWithHue(
+                          BitmapDescriptor.hueGreen,
+                        ),
+                        infoWindow: InfoWindow(
+                          title: 'Delivery location',
+                          snippet: _selectedAddress.isEmpty
+                              ? 'Selected location'
+                              : _selectedAddress,
+                        ),
                       ),
-                  ],
+                  },
                 ),
 
                 // =================================================
@@ -660,15 +772,11 @@ class _AddressSelectionScreenState extends State<AddressSelectionScreen> {
                   bottom: 20,
                   child: FloatingActionButton(
                     heroTag: 'select_location_current',
-
                     backgroundColor: Colors.white,
-
                     foregroundColor: green,
-
                     onPressed: _loadingLocation || _saving
                         ? null
                         : _useCurrentLocation,
-
                     child: _loadingLocation
                         ? const SizedBox(
                             width: 23,
@@ -702,15 +810,11 @@ class _AddressSelectionScreenState extends State<AddressSelectionScreen> {
                 ),
               ],
             ),
-
             child: SafeArea(
               top: false,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // ==================================================
-                  // ADDRESS TITLE
-                  // ==================================================
                   const Text(
                     'Deliver to',
                     style: TextStyle(color: Colors.grey, fontSize: 12),
@@ -718,9 +822,6 @@ class _AddressSelectionScreenState extends State<AddressSelectionScreen> {
 
                   const SizedBox(height: 5),
 
-                  // ==================================================
-                  // SELECTED ADDRESS
-                  // ==================================================
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -756,14 +857,11 @@ class _AddressSelectionScreenState extends State<AddressSelectionScreen> {
                       onPressed: _loadingLocation || _saving
                           ? null
                           : _useCurrentLocation,
-
                       icon: const Icon(Icons.my_location),
-
                       label: const Text(
                         'USE CURRENT LOCATION',
                         style: TextStyle(fontWeight: FontWeight.bold),
                       ),
-
                       style: OutlinedButton.styleFrom(
                         foregroundColor: green,
                         side: const BorderSide(color: green),
@@ -784,7 +882,6 @@ class _AddressSelectionScreenState extends State<AddressSelectionScreen> {
                     height: 52,
                     child: ElevatedButton(
                       onPressed: _saving ? null : _confirmAddress,
-
                       style: ElevatedButton.styleFrom(
                         backgroundColor: green,
                         foregroundColor: Colors.white,
@@ -793,7 +890,6 @@ class _AddressSelectionScreenState extends State<AddressSelectionScreen> {
                           borderRadius: BorderRadius.circular(13),
                         ),
                       ),
-
                       child: _saving
                           ? const SizedBox(
                               width: 23,

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../theme/app_colors.dart';
 
 class BannerSlider extends StatelessWidget {
   const BannerSlider({super.key});
@@ -11,7 +12,7 @@ class BannerSlider extends StatelessWidget {
         height: 160,
         width: double.infinity,
         decoration: BoxDecoration(
-          color: Colors.green,
+          color: AppColors.primary,
           borderRadius: BorderRadius.circular(20),
         ),
         child: const Center(

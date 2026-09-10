@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../theme/app_colors.dart';
 import '../models/address.dart';
 import '../services/address_service.dart';
 
@@ -109,9 +110,10 @@ class _AddressScreenState extends State<AddressScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: AppColors.background,
       appBar: AppBar(
         title: const Text("Add Address"),
-        backgroundColor: Colors.green,
+        backgroundColor: AppColors.primary,
         foregroundColor: Colors.white,
       ),
       body: Form(
@@ -156,7 +158,7 @@ class _AddressScreenState extends State<AddressScreen> {
             SizedBox(
               height: 55,
               child: ElevatedButton(
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary),
                 onPressed: loading ? null : saveAddress,
                 child: loading
                     ? const CircularProgressIndicator(color: Colors.white)

@@ -21,6 +21,7 @@ class AppTheme {
       backgroundColor: AppColors.primary,
       foregroundColor: Colors.white,
       elevation: 0,
+      surfaceTintColor: Colors.transparent,
       centerTitle: true,
     ),
 
@@ -37,7 +38,7 @@ class AppTheme {
         elevation: 0,
         minimumSize: const Size(0, 55),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-        textStyle: GoogleFonts.poppins(
+        textStyle: GoogleFonts.plusJakartaSans(
           fontSize: 16,
           fontWeight: FontWeight.w600,
         ),
@@ -62,6 +63,6 @@ class AppTheme {
       ),
     ),
 
-    textTheme: GoogleFonts.poppinsTextTheme(),
+    textTheme: GoogleFonts.plusJakartaSansTextTheme(),
   );
 }

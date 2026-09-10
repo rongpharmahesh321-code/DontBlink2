@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/email_auth_service.dart';
+import '../theme/app_colors.dart';
 
 class ForgotPasswordScreen extends StatefulWidget {
   const ForgotPasswordScreen({super.key});
@@ -41,7 +42,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text("Password reset email sent successfully!"),
-          backgroundColor: Colors.green,
+          backgroundColor: AppColors.primary,
         ),
       );
 
@@ -64,11 +65,11 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.deepPurple,
+      backgroundColor: AppColors.background,
 
       appBar: AppBar(
         title: const Text("Forgot Password"),
-        backgroundColor: Colors.deepPurple,
+        backgroundColor: AppColors.primary,
         foregroundColor: Colors.white,
       ),
 
@@ -90,7 +91,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
                   const Icon(
                     Icons.lock_reset,
                     size: 70,
-                    color: Colors.deepPurple,
+                    color: AppColors.primary,
                   ),
 
                   const SizedBox(height: 20),
@@ -127,7 +128,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
                     height: 55,
                     child: ElevatedButton(
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.deepPurple,
+                        backgroundColor: AppColors.primary,
                       ),
                       onPressed: loading ? null : resetPassword,
                       child: loading

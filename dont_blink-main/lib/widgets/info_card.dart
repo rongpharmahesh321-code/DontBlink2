@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../theme/app_colors.dart';
 
 class InfoCard extends StatelessWidget {
   final IconData icon;
@@ -11,7 +12,7 @@ class InfoCard extends StatelessWidget {
     required this.icon,
     required this.title,
     required this.subtitle,
-    this.iconColor = Colors.green,
+    this.iconColor = AppColors.primary,
   });
 
   @override

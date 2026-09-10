@@ -5,7 +5,6 @@ import '../models/address.dart';
 
 class AddressService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-
   final FirebaseAuth _auth = FirebaseAuth.instance;
 
   // ==========================================================
@@ -27,11 +26,6 @@ class AddressService {
   // ==========================================================
 
   Future<void> addAddress(Address address) async {
-    // --------------------------------------------------------
-    // If this address is default, remove default from
-    // all other addresses first.
-    // --------------------------------------------------------
-
     if (address.isDefault) {
       await _removeOtherDefaults();
     }
@@ -96,15 +90,7 @@ class AddressService {
   // ==========================================================
 
   Future<void> selectAddress(String addressId) async {
-    // --------------------------------------------------------
-    // Remove default from every other address.
-    // --------------------------------------------------------
-
     await _removeOtherDefaults(exceptId: addressId);
-
-    // --------------------------------------------------------
-    // Make selected address default.
-    // --------------------------------------------------------
 
     await _addressCollection.doc(addressId).update({
       'isDefault': true,
@@ -140,16 +126,21 @@ class AddressService {
   }
 
   // ==========================================================
-  // SAVE MAP / CURRENT LOCATION
+  // SAVE GOOGLE MAP LOCATION
   //
-  // This creates or updates the selected location and makes
-  // it the DEFAULT delivery address.
+  // Saves the selected Google Maps location as the
+  // user's DEFAULT delivery address.
   // ==========================================================
 
   Future<void> saveSelectedLocation({
     required String address,
     required double latitude,
     required double longitude,
+    String? house,
+    String? area,
+    String? city,
+    String? state,
+    String? pincode,
   }) async {
     final user = _auth.currentUser;
 
@@ -169,6 +160,11 @@ class AddressService {
 
     // --------------------------------------------------------
     // CHECK FOR EXISTING LOCATION
+    //
+    // Coordinates are treated as the source of truth.
+    // A small coordinate difference is expected when the
+    // customer moves the pin, so we don't rely heavily on
+    // exact address-string matching.
     // --------------------------------------------------------
 
     final existing = await _addressCollection
@@ -178,7 +174,7 @@ class AddressService {
         .get();
 
     // --------------------------------------------------------
-    // FIRST REMOVE DEFAULT FROM OTHER ADDRESSES
+    // REMOVE DEFAULT FROM OTHER ADDRESSES
     // --------------------------------------------------------
 
     await _removeOtherDefaults(
@@ -186,30 +182,44 @@ class AddressService {
     );
 
     // --------------------------------------------------------
-    // ADDRESS DATA
+    // NORMALIZE ADDRESS FIELDS
+    // --------------------------------------------------------
+
+    final normalizedHouse = house?.trim().isNotEmpty == true
+        ? house!.trim()
+        : address.trim();
+
+    final normalizedArea = area?.trim() ?? '';
+
+    final normalizedCity = city?.trim() ?? '';
+
+    final normalizedState = state?.trim() ?? '';
+
+    final normalizedPincode = pincode?.trim() ?? '';
+
+    // --------------------------------------------------------
+    // FIRESTORE DATA
     // --------------------------------------------------------
 
     final data = {
       'fullName': fullName,
-
       'phone': phone,
 
-      // Complete reverse-geocoded address.
-      'house': address,
+      // Structured address.
+      'house': normalizedHouse,
+      'area': normalizedArea,
+      'city': normalizedCity,
+      'state': normalizedState,
+      'pincode': normalizedPincode,
 
-      'area': '',
+      // Complete formatted Google address.
+      'formattedAddress': address.trim(),
 
-      'city': '',
-
-      'state': '',
-
-      'pincode': '',
-
-      // THIS IS THE IMPORTANT PART.
+      // Default delivery address.
       'isDefault': true,
 
+      // Exact map location.
       'latitude': latitude,
-
       'longitude': longitude,
 
       'updatedAt': FieldValue.serverTimestamp(),
