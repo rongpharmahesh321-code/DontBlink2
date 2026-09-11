@@ -46,3 +46,36 @@
 -keepclasseswithmembernames class * {
     native <methods>;
 }
+
+# ============================================================
+# Cashfree PG SDK
+# ============================================================
+-keep class com.cashfree.** { *; }
+-dontwarn com.cashfree.**
+
+# ============================================================
+# Flutter Local Notifications
+# ============================================================
+-keep class com.dexterous.flutterlocalnotifications.** { *; }
+-dontwarn com.dexterous.flutterlocalnotifications.**
+
+# ============================================================
+# AndroidX
+# ============================================================
+-keep class androidx.** { *; }
+-dontwarn androidx.**
+
+# ============================================================
+# Play Core / Flutter Deferred Components
+# ============================================================
+-dontwarn com.google.android.play.core.**
+-dontwarn io.flutter.embedding.engine.deferredcomponents.**
+
+# ============================================================
+# Common networking / annotations
+# ============================================================
+-dontwarn okhttp3.**
+-dontwarn okio.**
+-dontwarn javax.annotation.**
+-dontwarn org.checkerframework.**
+

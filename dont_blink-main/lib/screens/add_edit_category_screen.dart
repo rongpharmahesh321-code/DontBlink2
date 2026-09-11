@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/category.dart';
 import '../services/category_service.dart';
+import '../widgets/cached_product_image.dart';
 
 class AddEditCategoryScreen extends StatefulWidget {
   final CategoryModel? category;
@@ -237,27 +238,27 @@ class _AddEditCategoryScreenState extends State<AddEditCategoryScreen> {
         border: Border.all(color: Colors.grey.shade300),
       ),
       clipBehavior: Clip.antiAlias,
-      child: Image.network(
-        imageUrl,
+      child: CachedProductImage(
+        url: imageUrl,
         fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) {
-          return Container(
-            color: Colors.grey.shade100,
-            child: const Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.broken_image, size: 45, color: Colors.grey),
-                  SizedBox(height: 8),
-                  Text(
-                    'Unable to load image',
-                    style: TextStyle(color: Colors.grey),
-                  ),
-                ],
-              ),
+        cacheWidth: 600,
+        cacheHeight: 320,
+        errorWidget: Container(
+          color: Colors.grey.shade100,
+          child: const Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.broken_image, size: 45, color: Colors.grey),
+                SizedBox(height: 8),
+                Text(
+                  'Unable to load image',
+                  style: TextStyle(color: Colors.grey),
+                ),
+              ],
             ),
-          );
-        },
+          ),
+        ),
       ),
     );
   }

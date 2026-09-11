@@ -5,6 +5,7 @@ import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'admin_subcategories_screen.dart';
+import '../widgets/cached_product_image.dart';
 
 class AdminCategoriesScreen extends StatefulWidget {
   const AdminCategoriesScreen({super.key});
@@ -594,19 +595,19 @@ class _AdminCategoriesScreenState extends State<AdminCategoriesScreen> {
                                         ),
                                         clipBehavior: Clip.antiAlias,
                                         child: imageUrl.isNotEmpty
-                                            ? Image.network(
-                                                imageUrl,
+                                            ? CachedProductImage(
+                                                url: imageUrl,
                                                 fit: BoxFit.cover,
-                                                errorBuilder: (_, __, ___) {
-                                                  return const Center(
-                                                    child: Icon(
-                                                      Icons
-                                                          .broken_image_outlined,
-                                                      color: Colors.grey,
-                                                      size: 38,
-                                                    ),
-                                                  );
-                                                },
+                                                cacheWidth: 300,
+                                                cacheHeight: 300,
+                                                errorWidget: const Center(
+                                                  child: Icon(
+                                                    Icons
+                                                        .broken_image_outlined,
+                                                    color: Colors.grey,
+                                                    size: 38,
+                                                  ),
+                                                ),
                                               )
                                             : const Center(
                                                 child: Icon(
@@ -1164,12 +1165,13 @@ class _AdminCategoriesScreenState extends State<AdminCategoriesScreen> {
             ),
             clipBehavior: Clip.antiAlias,
             child: imageUrl.isNotEmpty
-                ? Image.network(
-                    imageUrl,
+                ? CachedProductImage(
+                    url: imageUrl,
                     fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) {
-                      return _placeholder();
-                    },
+                    cacheWidth: 240,
+                    cacheHeight: 240,
+                    placeholder: _placeholder(),
+                    errorWidget: _placeholder(),
                   )
                 : _placeholder(),
           ),

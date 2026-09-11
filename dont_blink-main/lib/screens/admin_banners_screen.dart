@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import '../widgets/cached_product_image.dart';
 
 class AdminBannersScreen extends StatefulWidget {
   const AdminBannersScreen({super.key});
@@ -384,18 +385,18 @@ class _AdminBannersScreenState extends State<AdminBannersScreen> {
                                     ),
                                     clipBehavior: Clip.antiAlias,
                                     child: imageUrl.isNotEmpty
-                                        ? Image.network(
-                                            imageUrl,
+                                        ? CachedProductImage(
+                                            url: imageUrl,
                                             fit: BoxFit.cover,
-                                            errorBuilder: (_, __, ___) {
-                                              return const Center(
-                                                child: Icon(
-                                                  Icons.broken_image_outlined,
-                                                  color: Colors.grey,
-                                                  size: 40,
-                                                ),
-                                              );
-                                            },
+                                            cacheWidth: 600,
+                                            cacheHeight: 360,
+                                            errorWidget: const Center(
+                                              child: Icon(
+                                                Icons.broken_image_outlined,
+                                                color: Colors.grey,
+                                                size: 40,
+                                              ),
+                                            ),
                                           )
                                         : const Center(
                                             child: Icon(
@@ -1060,21 +1061,21 @@ class _AdminBannersScreenState extends State<AdminBannersScreen> {
                 height: 165,
                 width: double.infinity,
                 child: imageUrl.isNotEmpty
-                    ? Image.network(
-                        imageUrl,
+                    ? CachedProductImage(
+                        url: imageUrl,
                         fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) {
-                          return Container(
-                            color: Colors.deepOrange.shade50,
-                            child: const Center(
-                              child: Icon(
-                                Icons.broken_image_outlined,
-                                color: Colors.deepOrange,
-                                size: 42,
-                              ),
+                        cacheWidth: 800,
+                        cacheHeight: 400,
+                        errorWidget: Container(
+                          color: Colors.deepOrange.shade50,
+                          child: const Center(
+                            child: Icon(
+                              Icons.broken_image_outlined,
+                              color: Colors.deepOrange,
+                              size: 42,
                             ),
-                          );
-                        },
+                          ),
+                        ),
                       )
                     : Container(
                         color: Colors.deepOrange.shade50,

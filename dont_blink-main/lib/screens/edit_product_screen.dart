@@ -8,6 +8,7 @@ import 'package:image_picker/image_picker.dart';
 import '../models/category.dart';
 import '../services/category_service.dart';
 import '../services/section_service.dart';
+import '../widgets/cached_product_image.dart';
 
 class EditProductScreen extends StatefulWidget {
   final String productId;
@@ -605,19 +606,14 @@ class _EditProductScreenState extends State<EditProductScreen> {
       children: [
         ClipRRect(
           borderRadius: BorderRadius.circular(17),
-
-          child: Image.network(
-            existingImageUrl,
-
+          child: CachedProductImage(
+            url: existingImageUrl,
             width: double.infinity,
-
             height: 220,
-
+            cacheWidth: 600,
+            cacheHeight: 440,
             fit: BoxFit.cover,
-
-            errorBuilder: (_, __, ___) {
-              return _emptyImagePreview();
-            },
+            errorWidget: _emptyImagePreview(),
           ),
         ),
 

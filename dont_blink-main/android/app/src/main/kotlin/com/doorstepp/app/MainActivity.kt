@@ -3,12 +3,18 @@ package com.doorstepp.app
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
-import com.doorstepp.app.BuildConfig
+import android.os.Bundle
+import androidx.core.view.WindowCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+    }
 
     companion object {
         private const val CHANNEL = "com.doorstepp.app/google_config"

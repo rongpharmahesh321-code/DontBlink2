@@ -11,6 +11,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
 
 import '../models/order.dart';
+import '../widgets/cached_product_image.dart';
 
 // ==========================================================
 // THEME COLORS (matching CheckoutScreen)
@@ -919,16 +920,16 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen>
         children: [
           ClipRRect(
             borderRadius: BorderRadius.circular(10),
-            child: image.trim().isNotEmpty
-                ? Image.network(
-                    image,
-                    width: 62,
-                    height: 62,
-                    fit: BoxFit.cover,
-                    errorBuilder: (context, error, stackTrace) =>
-                        _productPlaceholder(),
-                  )
-                : _productPlaceholder(),
+            child: CachedProductImage(
+              url: image,
+              width: 62,
+              height: 62,
+              cacheWidth: 186,
+              cacheHeight: 186,
+              fit: BoxFit.cover,
+              placeholder: _productPlaceholder(),
+              errorWidget: _productPlaceholder(),
+            ),
           ),
           const SizedBox(width: 12),
           Expanded(
